@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build and test artifacts
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data and logs
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.log
+logs/
+
+# Local tooling
+.pnpm-store/
+.DS_Store
+Thumbs.db
