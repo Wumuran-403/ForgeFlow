@@ -1,10 +1,12 @@
 import { z } from "zod";
 
+import { ToolNameSchema } from "../shared/tool-name.js";
+
 export const ToolCallSchema = z
   .object({
     id: z.string().min(1),
-    name: z.string().min(1),
-    arguments: z.record(z.string(), z.unknown()),
+    name: ToolNameSchema,
+    arguments: z.union([z.record(z.string(), z.unknown()), z.string()]),
   })
   .strict();
 
@@ -48,9 +50,9 @@ export const ModelUsageSchema = z
 
 export const ModelToolDefinitionSchema = z
   .object({
-    name: z.string().min(1),
+    name: ToolNameSchema,
     description: z.string(),
-    inputSchema: z.record(z.string(), z.unknown()),
+    parameters: z.record(z.string(), z.unknown()),
   })
   .strict();
 

@@ -11,7 +11,7 @@ describe("runHealthCheck", () => {
     expect(report).toMatchObject({
       status: "ok",
       service: "forgeflow",
-      phase: "phase-0",
+      phase: "phase-2",
       provider: "mock",
       model: "mock-model",
     });
