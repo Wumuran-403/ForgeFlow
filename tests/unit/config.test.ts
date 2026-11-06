@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { loadConfig } from "../../src/config/env.js";
+import {
+  DEFAULT_DATABASE_PATH,
+  loadConfig,
+} from "../../src/config/env.js";
 import { ConfigurationError } from "../../src/shared/errors.js";
 
 describe("loadConfig", () => {
@@ -10,6 +13,7 @@ describe("loadConfig", () => {
     expect(config.llm.provider).toBe("mock");
     expect(config.llm.model).toBe("mock-model");
     expect(config.llm.apiKey).toBeUndefined();
+    expect(config.database.path).toBe(DEFAULT_DATABASE_PATH);
   });
 
   it("requires provider credentials for DeepSeek", () => {
@@ -30,5 +34,13 @@ describe("loadConfig", () => {
   it("rejects invalid numeric limits", () => {
     expect(() => loadConfig({ LLM_TIMEOUT_MS: "0" })).toThrow(ConfigurationError);
     expect(() => loadConfig({ LLM_MAX_RETRIES: "-1" })).toThrow(ConfigurationError);
+  });
+
+  it("accepts an explicit database path without creating it", () => {
+    const config = loadConfig({
+      DATABASE_PATH: "tmp/test-forgeflow.db",
+    });
+
+    expect(config.database.path).toBe("tmp/test-forgeflow.db");
   });
 });

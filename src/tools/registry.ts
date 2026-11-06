@@ -1,4 +1,7 @@
 import {
+  assertCanonicalJsonValue,
+} from "../shared/canonical-json.js";
+import {
   ToolAlreadyRegisteredError,
   ToolDefinitionInvalidError,
   ToolExecutionError,
@@ -61,84 +64,6 @@ function deepFreeze(value: unknown, seen = new WeakSet<object>()): void {
   Object.freeze(value);
 }
 
-function isJsonCompatible(
-  value: unknown,
-  ancestors = new WeakSet<object>(),
-): boolean {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return true;
-  }
-
-  if (typeof value === "number") {
-    return Number.isFinite(value) && !Object.is(value, -0);
-  }
-
-  if (value === undefined || typeof value === "bigint" || typeof value === "symbol") {
-    return false;
-  }
-
-  if (typeof value === "function") {
-    return false;
-  }
-
-  if (typeof value !== "object") {
-    return false;
-  }
-
-  if (ancestors.has(value)) {
-    return false;
-  }
-
-  ancestors.add(value);
-
-  try {
-    if (Array.isArray(value)) {
-      const keys = Reflect.ownKeys(value);
-      if (keys.length !== value.length + 1 || keys[keys.length - 1] !== "length") {
-        return false;
-      }
-
-      for (let index = 0; index < value.length; index += 1) {
-        if (!Object.hasOwn(value, index) || !isJsonCompatible(value[index], ancestors)) {
-          return false;
-        }
-      }
-
-      return true;
-    }
-
-    const prototype = Object.getPrototypeOf(value) as object | null;
-    if (prototype !== Object.prototype && prototype !== null) {
-      return false;
-    }
-
-    const keys = Reflect.ownKeys(value);
-    for (const key of keys) {
-      if (typeof key !== "string") {
-        return false;
-      }
-
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (
-        descriptor === undefined ||
-        !("value" in descriptor) ||
-        !descriptor.enumerable ||
-        !isJsonCompatible(descriptor.value, ancestors)
-      ) {
-        return false;
-      }
-    }
-
-    return true;
-  } finally {
-    ancestors.delete(value);
-  }
-}
-
 export class ToolRegistry {
   private readonly tools = new Map<string, StoredTool>();
   private readonly validatedInputs = new WeakMap<
@@ -156,6 +81,7 @@ export class ToolRegistry {
       mode: definition.mode,
     });
     const optionsResult = ToolRegistrationOptionsSchema.safeParse({
+      version: definition.version,
       timeoutMs: definition.timeoutMs,
       requiresApproval: definition.requiresApproval,
     });
@@ -183,6 +109,7 @@ export class ToolRegistry {
 
     const registeredMetadata: RegisteredToolMetadata = Object.freeze({
       ...metadata,
+      version: options.version ?? "1",
       inputSchema: definition.inputSchema,
       timeoutMs: options.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
       requiresApproval:
@@ -259,7 +186,9 @@ export class ToolRegistry {
       );
     }
 
-    if (!isJsonCompatible(parsedInput.data)) {
+    try {
+      assertCanonicalJsonValue(parsedInput.data);
+    } catch {
       throw new ToolInputValidationError(name, [
         {
           path: "input",

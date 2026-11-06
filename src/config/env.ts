@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { ConfigurationError } from "../shared/errors.js";
 
+export const DEFAULT_DATABASE_PATH = "data/forgeflow.db";
+
 const optionalNonEmptyString = z.preprocess(
   (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
   z.string().trim().min(1).optional(),
@@ -18,6 +20,7 @@ const envSchema = z
     FORGEFLOW_LOG_LEVEL: z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
       .default("info"),
+    DATABASE_PATH: optionalNonEmptyString,
     LLM_PROVIDER: z.enum(["mock", "deepseek"]).default("mock"),
     LLM_MODEL: optionalNonEmptyString,
     LLM_BASE_URL: optionalUrl,
@@ -45,6 +48,9 @@ const envSchema = z
 export interface AppConfig {
   environment: "development" | "test" | "production";
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  database: {
+    path: string;
+  };
   llm: {
     provider: "mock" | "deepseek";
     model: string;
@@ -81,6 +87,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
   return {
     environment: values.NODE_ENV,
     logLevel: values.FORGEFLOW_LOG_LEVEL,
+    database: {
+      path: values.DATABASE_PATH ?? DEFAULT_DATABASE_PATH,
+    },
     llm: {
       provider: values.LLM_PROVIDER,
       model,

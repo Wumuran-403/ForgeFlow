@@ -3,6 +3,7 @@ import type { AppErrorDetail } from "../shared/errors.js";
 import type {
   ToolExecutionContext,
   ToolMode,
+  ValidatedToolInput,
 } from "../tools/types.js";
 
 export interface PlannedToolCallBase {
@@ -55,8 +56,14 @@ export type SchedulerWorkerContext = Pick<
   "taskId" | "signal"
 >;
 
-export type ReadWorkerPoolContext = SchedulerWorkerContext;
-export type WriteExecutorContext = SchedulerWorkerContext;
+export type ReadWorkerPoolContext = SchedulerWorkerContext & {
+  readonly persistence?: ToolExecutionPersistence;
+  readonly validatedInputs?: ReadonlyMap<string, ValidatedToolInput>;
+};
+export type WriteExecutorContext = SchedulerWorkerContext & {
+  readonly persistence?: ToolExecutionPersistence;
+  readonly validatedInputs?: ReadonlyMap<string, ValidatedToolInput>;
+};
 
 export interface ToolResultError {
   readonly code: string;
@@ -119,7 +126,8 @@ export interface WriteToolResult {
 export type TaskSchedulerTermination =
   | "completed"
   | "cancelled"
-  | "write_outcome_unknown";
+  | "write_outcome_unknown"
+  | "persistence_failed";
 
 export type ScheduledToolResultStatus =
   | "succeeded"
@@ -144,4 +152,23 @@ export interface TaskSchedulerResult {
   readonly results: readonly ScheduledToolResult[];
 }
 
-export type TaskSchedulerContext = SchedulerWorkerContext;
+export interface ToolExecutionPersistence {
+  beforeExecute(
+    task: PlannedKnownToolCall,
+    context: SchedulerWorkerContext,
+  ): void;
+  persistReadResult(
+    task: PlannedKnownToolCall,
+    result: ReadToolResult,
+  ): void;
+  persistWriteResult(
+    task: PlannedKnownToolCall,
+    result: WriteToolResult,
+  ): void;
+}
+
+export type TaskSchedulerContext = SchedulerWorkerContext & {
+  readonly schedulePlan?: SchedulePlan;
+  readonly persistence?: ToolExecutionPersistence;
+  readonly validatedInputs?: ReadonlyMap<string, ValidatedToolInput>;
+};

@@ -181,6 +181,7 @@ export class ReadWorkerPool {
     }
 
     const results: Array<ReadToolResult | undefined> = new Array(tasks.length);
+    const startedToolCalls = new Set<string>();
     const workerCount = Math.min(this.maxConcurrency, tasks.length);
     let nextIndex = 0;
 
@@ -203,7 +204,11 @@ export class ReadWorkerPool {
 
         this.activeTasks += 1;
         try {
-          results[index] = await this.executeTask(task, context);
+          results[index] = await this.executeTask(
+            task,
+            context,
+            startedToolCalls,
+          );
         } catch (error) {
           results[index] = failure(task, toSafeReadError(error));
         } finally {
@@ -239,12 +244,23 @@ export class ReadWorkerPool {
             message: "The read tool failed without exposing internal error details.",
             details: [],
           });
+    }).map((result, index) => {
+      const task = tasks[index];
+      if (
+        task === undefined ||
+        task.mode !== "read" ||
+        !startedToolCalls.has(task.toolCallId)
+      ) {
+        return result;
+      }
+      return persistReadResult(task, result, context);
     });
   }
 
   private async executeTask(
     task: PlannedToolCall,
     context: ReadWorkerPoolContext,
+    startedToolCalls: Set<string>,
   ): Promise<ReadToolResult> {
     let metadata;
     try {
@@ -268,16 +284,27 @@ export class ReadWorkerPool {
 
     let validatedInput;
     try {
-      validatedInput = await this.registry.validateInput(
-        task.toolName,
-        parsedArguments.value,
-      );
+      validatedInput =
+        context.validatedInputs?.get(task.toolCallId) ??
+        (await this.registry.validateInput(
+          task.toolName,
+          parsedArguments.value,
+        ));
     } catch (error) {
       return failure(task, toSafeReadError(error));
     }
 
     if (context.signal.aborted) {
       return failure(task, READ_CANCELLED_ERROR, "cancelled");
+    }
+
+    try {
+      context.persistence?.beforeExecute(task, context);
+      if (context.persistence !== undefined) {
+        startedToolCalls.add(task.toolCallId);
+      }
+    } catch (error) {
+      return failure(task, toSafeReadError(error));
     }
 
     const abortScope = createAbortScope(context.signal);
@@ -341,15 +368,18 @@ export class ReadWorkerPool {
     }
 
     if (executionState.termination === "timed_out") {
-      return failure(task, READ_TIMEOUT_ERROR, "timed_out");
+      const result = failure(task, READ_TIMEOUT_ERROR, "timed_out");
+      return result;
     }
 
     if (executionState.termination === "cancelled") {
-      return failure(task, READ_CANCELLED_ERROR, "cancelled");
+      const result = failure(task, READ_CANCELLED_ERROR, "cancelled");
+      return result;
     }
 
     if (executionState.termination === "failed") {
-      return failure(task, toSafeReadError(executionError));
+      const result = failure(task, toSafeReadError(executionError));
+      return result;
     }
 
     return {
@@ -359,5 +389,27 @@ export class ReadWorkerPool {
       status: "succeeded",
       output,
     };
+  }
+}
+
+function persistReadResult(
+  task: PlannedKnownToolCall,
+  result: ReadToolResult,
+  context: ReadWorkerPoolContext,
+): ReadToolResult {
+  if (context.persistence === undefined) {
+    return result;
+  }
+  try {
+    context.persistence.persistReadResult(task, result);
+    return result;
+  } catch (error) {
+    throw new AppError({
+      code: "READ_RESULT_PERSISTENCE_FAILED",
+      message: "The read result could not be persisted safely.",
+      statusCode: 500,
+      details: [],
+      cause: error,
+    });
   }
 }

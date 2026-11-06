@@ -29,6 +29,7 @@ export type {
   TaskSchedulerContext,
   TaskSchedulerResult,
   TaskSchedulerTermination,
+  ToolExecutionPersistence,
   ToolResultError,
   UnknownToolReason,
   UnknownToolStep,

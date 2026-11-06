@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import type { AgentMessage } from "../provider/types.js";
+import type {
+  AgentMessage,
+  ModelRequest,
+  ModelResponse,
+} from "../provider/types.js";
+import type { TaskSchedulerContext } from "../scheduler/types.js";
 import type { ToolMode } from "../tools/types.js";
 
 export const AgentLimitsSchema = z
@@ -34,7 +39,8 @@ export type AgentStopReason =
   | "cancelled"
   | "provider_error"
   | "empty_response"
-  | "write_outcome_unknown";
+  | "write_outcome_unknown"
+  | "persistence_failed";
 
 export type AgentToolResultStatus =
   | "succeeded"
@@ -72,4 +78,25 @@ export interface AgentRunResult {
   modelRequests: number;
   toolCalls: number;
   finalAnswer?: string;
+}
+
+export interface AgentPersistenceAdapter {
+  readonly taskId: string;
+  readonly initialMessages: readonly AgentMessage[];
+  readonly initialModelRequests: number;
+  readonly initialToolCalls: number;
+  beginModelCall(request: ModelRequest, iteration: number): string;
+  failModelCall(
+    modelCallId: string,
+    status: "failed" | "cancelled" | "interrupted",
+    durationMs: number,
+    error: AgentToolError,
+  ): void;
+  completeModelResponse(input: {
+    readonly modelCallId: string;
+    readonly response: ModelResponse;
+    readonly durationMs: number;
+  }): Promise<void>;
+  createSchedulerContext(signal: AbortSignal): TaskSchedulerContext;
+  finishRun(result: AgentRunResult): void;
 }

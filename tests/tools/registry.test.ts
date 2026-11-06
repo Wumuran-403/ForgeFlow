@@ -51,6 +51,7 @@ describe("ToolRegistry", () => {
       name: "inventory_search",
       description: "Search demo inventory.",
       mode: "read",
+      version: "1",
     });
     expect(registry.get("inventory_search").inputSchema).toBe(searchInputSchema);
     expect(registry.list()).toHaveLength(1);
@@ -161,6 +162,27 @@ describe("ToolRegistry", () => {
     });
   });
 
+  it("uses version 1 by default and preserves an explicit tool version", () => {
+    const registry = new ToolRegistry();
+    registry.register(createSearchTool(async () => []));
+    registry.register({
+      ...createSearchTool(async () => []),
+      name: "inventory_versioned",
+      version: "2.1",
+    });
+
+    expect(registry.get("inventory_search").version).toBe("1");
+    expect(registry.get("inventory_versioned").version).toBe("2.1");
+
+    expect(() =>
+      registry.register({
+        ...createSearchTool(async () => []),
+        name: "inventory_empty_version",
+        version: " ",
+      }),
+    ).toThrow(ToolDefinitionInvalidError);
+  });
+
   it("rejects invalid timeout values", () => {
     const registry = new ToolRegistry();
 
@@ -182,6 +204,7 @@ describe("ToolRegistry", () => {
       taskId: "task-context",
       toolCallId: "call-context",
       signal: controller.signal,
+      fencingToken: 7,
     };
     let receivedContext: ToolExecutionContext | undefined;
     registry.register({

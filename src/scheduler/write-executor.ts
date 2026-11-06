@@ -303,10 +303,12 @@ export class WriteExecutor {
 
     let validatedInput;
     try {
-      validatedInput = await this.registry.validateInput(
-        task.toolName,
-        parsedArguments.value,
-      );
+      validatedInput =
+        context.validatedInputs?.get(task.toolCallId) ??
+        (await this.registry.validateInput(
+          task.toolName,
+          parsedArguments.value,
+        ));
     } catch (error) {
       return resultWithStatus(
         task,
@@ -321,10 +323,14 @@ export class WriteExecutor {
 
     if (validatedInput.requiresApproval) {
       if (this.approvalHandler === undefined) {
-        return resultWithStatus(
+        return persistPreExecutionResult(
+          context,
           task,
-          "skipped",
-          DEFAULT_APPROVAL_REQUIRED_ERROR,
+          resultWithStatus(
+            task,
+            "skipped",
+            DEFAULT_APPROVAL_REQUIRED_ERROR,
+          ),
         );
       }
 
@@ -332,11 +338,15 @@ export class WriteExecutor {
       try {
         approvalInput = structuredClone(validatedInput.value);
       } catch {
-        return resultWithStatus(task, "failed", {
-          code: "WRITE_APPROVAL_INPUT_INVALID",
-          message: "The write input cannot be prepared for approval.",
-          details: [],
-        });
+        return persistPreExecutionResult(
+          context,
+          task,
+          resultWithStatus(task, "failed", {
+            code: "WRITE_APPROVAL_INPUT_INVALID",
+            message: "The write input cannot be prepared for approval.",
+            details: [],
+          }),
+        );
       }
 
       const approvalOutcome = await requestApproval(
@@ -353,46 +363,70 @@ export class WriteExecutor {
       );
 
       if (context.signal.aborted) {
-        return resultWithStatus(task, "cancelled", WRITE_CANCELLED_ERROR);
+        return persistPreExecutionResult(
+          context,
+          task,
+          resultWithStatus(task, "cancelled", WRITE_CANCELLED_ERROR),
+        );
       }
 
       if (approvalOutcome.kind === "timeout") {
-        return resultWithStatus(
+        return persistPreExecutionResult(
+          context,
           task,
-          "skipped",
-          WRITE_APPROVAL_TIMEOUT_ERROR,
+          resultWithStatus(
+            task,
+            "skipped",
+            WRITE_APPROVAL_TIMEOUT_ERROR,
+          ),
         );
       }
 
       if (approvalOutcome.kind === "cancelled") {
-        return resultWithStatus(task, "cancelled", WRITE_CANCELLED_ERROR);
+        return persistPreExecutionResult(
+          context,
+          task,
+          resultWithStatus(task, "cancelled", WRITE_CANCELLED_ERROR),
+        );
       }
 
       if (approvalOutcome.kind === "failed") {
-        return resultWithStatus(task, "failed", {
-          code: "WRITE_APPROVAL_FAILED",
-          message: "The write approval request failed.",
-          details: [],
-        });
+        return persistPreExecutionResult(
+          context,
+          task,
+          resultWithStatus(task, "failed", {
+            code: "WRITE_APPROVAL_FAILED",
+            message: "The write approval request failed.",
+            details: [],
+          }),
+        );
       }
 
       const parsedDecision = WriteApprovalDecisionSchema.safeParse(
         approvalOutcome.decision,
       );
       if (!parsedDecision.success) {
-        return resultWithStatus(task, "skipped", {
-          code: "WRITE_APPROVAL_INVALID",
-          message: "The write approval decision was invalid.",
-          details: [],
-        });
+        return persistPreExecutionResult(
+          context,
+          task,
+          resultWithStatus(task, "skipped", {
+            code: "WRITE_APPROVAL_INVALID",
+            message: "The write approval decision was invalid.",
+            details: [],
+          }),
+        );
       }
 
       if (parsedDecision.data.status !== "approved") {
-        return resultWithStatus(task, "skipped", {
-          code: "WRITE_APPROVAL_REJECTED",
-          message: "The write tool was not approved.",
-          details: [],
-        });
+        return persistPreExecutionResult(
+          context,
+          task,
+          resultWithStatus(task, "skipped", {
+            code: "WRITE_APPROVAL_REJECTED",
+            message: "The write tool was not approved.",
+            details: [],
+          }),
+        );
       }
     }
 
@@ -402,6 +436,16 @@ export class WriteExecutor {
 
     if (context.signal.aborted) {
       return resultWithStatus(task, "cancelled", WRITE_CANCELLED_ERROR);
+    }
+
+    try {
+      context.persistence?.beforeExecute(task, context);
+    } catch (error) {
+      return resultWithStatus(
+        task,
+        "failed",
+        toSafePreExecutionError(error),
+      );
     }
 
     const abortScope = createAbortScope(context.signal);
@@ -456,26 +500,84 @@ export class WriteExecutor {
     }
 
     if (executionState.termination === "failed") {
-      return resultWithStatus(task, "failed", {
-        code: "TOOL_VALIDATED_INPUT_INVALID",
-        message: "Validated tool input is not valid for the current tool definition.",
+      return persistWriteResult(context, task, resultWithStatus(task, "unknown", {
+        code: "WRITE_OUTCOME_UNKNOWN",
+        message: "The write outcome is unknown and must not be retried automatically.",
         details: [],
-      });
+      }));
     }
 
     if (
       executionState.termination === "unknown" ||
       !isJsonSerializable(output)
     ) {
-      return resultWithStatus(task, "unknown", WRITE_OUTCOME_UNKNOWN_ERROR);
+      return persistWriteResult(
+        context,
+        task,
+        resultWithStatus(task, "unknown", WRITE_OUTCOME_UNKNOWN_ERROR),
+      );
     }
 
-    return {
+    const succeeded = {
       originalIndex: task.originalIndex,
       toolCallId: task.toolCallId,
       toolName: task.toolName,
-      status: "succeeded",
+      status: "succeeded" as const,
       output,
     };
+    if (context.persistence === undefined) {
+      return succeeded;
+    }
+    try {
+      context.persistence.persistWriteResult(task, succeeded);
+      return succeeded;
+    } catch {
+      const unknown = resultWithStatus(
+        task,
+        "unknown",
+        WRITE_OUTCOME_UNKNOWN_ERROR,
+      );
+      try {
+        context.persistence.persistWriteResult(task, unknown);
+      } catch {
+        // A dead database leaves the persisted intent as running; Step 6
+        // recovery turns that intent into unknown.
+      }
+      return unknown;
+    }
   }
+}
+
+function persistWriteResult(
+  context: WriteExecutorContext,
+  task: PlannedKnownToolCall,
+  result: WriteToolResult,
+): WriteToolResult {
+  if (context.persistence === undefined) {
+    return result;
+  }
+  try {
+    context.persistence.persistWriteResult(task, result);
+    return result;
+  } catch {
+    return resultWithStatus(task, "unknown", {
+      code: "WRITE_OUTCOME_UNKNOWN",
+      message: "The write outcome is unknown and must not be retried automatically.",
+      details: [],
+    });
+  }
+}
+
+function persistPreExecutionResult(
+  context: WriteExecutorContext,
+  task: PlannedKnownToolCall,
+  result: WriteToolResult,
+): WriteToolResult {
+  try {
+    context.persistence?.persistWriteResult(task, result);
+  } catch {
+    // The scheduler still receives the safe skipped/failed result. Step 6
+    // handles any persisted pre-execution residue that could not be updated.
+  }
+  return result;
 }

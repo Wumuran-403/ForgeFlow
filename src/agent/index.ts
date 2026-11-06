@@ -2,6 +2,7 @@ export { AgentRunner, type AgentRunOptions, type AgentRunnerOptions } from "./ag
 export {
   AgentLimitsSchema,
   AgentRunInputSchema,
+  type AgentPersistenceAdapter,
   type AgentLimits,
   type AgentRunInput,
   type AgentRunResult,

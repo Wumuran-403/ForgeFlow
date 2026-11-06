@@ -101,11 +101,15 @@ export class TaskScheduler {
     this.writeExecutor = options.writeExecutor;
   }
 
+  plan(toolCalls: readonly ToolCall[]): SchedulePlan {
+    return this.planner.plan(toolCalls);
+  }
+
   async execute(
     toolCalls: readonly ToolCall[],
     context: TaskSchedulerContext,
   ): Promise<TaskSchedulerResult> {
-    const plan = this.planner.plan(toolCalls);
+    const plan = context.schedulePlan ?? this.planner.plan(toolCalls);
     const modes = collectModes(plan);
     const results: Array<ScheduledToolResult | undefined> = new Array(
       toolCalls.length,
@@ -172,7 +176,7 @@ export class TaskScheduler {
             );
             break;
           }
-        } catch {
+        } catch (error) {
           for (const item of step.items) {
             results[item.originalIndex] = {
               originalIndex: item.originalIndex,
@@ -185,6 +189,23 @@ export class TaskScheduler {
                 "The read batch failed without exposing internal error details.",
               ),
             };
+          }
+          if (
+            error instanceof AppError &&
+            error.code === "READ_RESULT_PERSISTENCE_FAILED"
+          ) {
+            termination = "persistence_failed";
+            this.fillUnstarted(
+              results,
+              toolCalls,
+              modes,
+              "skipped",
+              schedulerError(
+                "READ_RESULT_PERSISTENCE_FAILED",
+                "Execution stopped because a read result could not be persisted.",
+              ),
+            );
+            break;
           }
         }
         continue;

@@ -24,6 +24,7 @@ import {
   AgentLimitsSchema,
   AgentRunInputSchema,
   type AgentLimits,
+  type AgentPersistenceAdapter,
   type AgentRunInput,
   type AgentRunResult,
   type AgentToolError,
@@ -44,6 +45,7 @@ export interface AgentRunnerOptions {
   systemPrompt?: string;
   taskIdFactory?: () => string;
   scheduler?: TaskScheduler;
+  persistence?: AgentPersistenceAdapter;
 }
 
 export interface AgentRunOptions {
@@ -176,6 +178,7 @@ export class AgentRunner {
   private readonly systemPrompt: string;
   private readonly taskIdFactory: () => string;
   private readonly scheduler: TaskScheduler | undefined;
+  private readonly persistence: AgentPersistenceAdapter | undefined;
 
   constructor(options: AgentRunnerOptions) {
     this.provider = options.provider;
@@ -188,6 +191,7 @@ export class AgentRunner {
     this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.taskIdFactory = options.taskIdFactory ?? randomUUID;
     this.scheduler = options.scheduler;
+    this.persistence = options.persistence;
 
     if (
       this.scheduler !== undefined &&
@@ -219,22 +223,34 @@ export class AgentRunner {
     input: AgentRunInput,
     options: AgentRunOptions,
   ): Promise<AgentRunResult> {
+    const result = await this.runLoop(input, options);
+    this.persistence?.finishRun(result);
+    return result;
+  }
+
+  private async runLoop(
+    input: AgentRunInput,
+    options: AgentRunOptions,
+  ): Promise<AgentRunResult> {
     const parsedInput = AgentRunInputSchema.parse(input);
-    const taskId = this.taskIdFactory();
+    const taskId = this.persistence?.taskId ?? this.taskIdFactory();
     const executionSignal = options.signal ?? new AbortController().signal;
-    const messages: AgentMessage[] = [
-      {
-        role: "system",
-        content: parsedInput.systemPrompt ?? this.systemPrompt,
-      },
-      {
-        role: "user",
-        content: parsedInput.objective,
-      },
-    ];
+    const messages: AgentMessage[] =
+      this.persistence === undefined
+        ? [
+            {
+              role: "system",
+              content: parsedInput.systemPrompt ?? this.systemPrompt,
+            },
+            {
+              role: "user",
+              content: parsedInput.objective,
+            },
+          ]
+        : [...this.persistence.initialMessages];
     const toolResults: AgentToolResult[] = [];
-    let modelRequests = 0;
-    let toolCalls = 0;
+    let modelRequests = this.persistence?.initialModelRequests ?? 0;
+    let toolCalls = this.persistence?.initialToolCalls ?? 0;
 
     if (isAborted(options.signal)) {
       return this.createResult({
@@ -274,18 +290,37 @@ export class AgentRunner {
       }
 
       let response;
+      let modelCallId: string | undefined;
+      const request = {
+        model: this.model,
+        messages,
+        tools: this.getModelTools(),
+      };
+      const requestStartedAt = Date.now();
       modelRequests += 1;
       try {
+        modelCallId = this.persistence?.beginModelCall(
+          request,
+          modelRequests,
+        );
         const rawResponse = await this.provider.generate(
-          {
-            model: this.model,
-            messages,
-            tools: this.getModelTools(),
-          },
+          request,
           options.signal === undefined ? {} : { signal: options.signal },
         );
 
         if (isAborted(options.signal)) {
+          if (this.persistence !== undefined && modelCallId !== undefined) {
+            this.persistence.failModelCall(
+              modelCallId,
+              "cancelled",
+              Date.now() - requestStartedAt,
+              {
+                code: "MODEL_CALL_CANCELLED",
+                message: "The model call was cancelled.",
+                details: [],
+              },
+            );
+          }
           return this.createResult({
             taskId,
             status: "cancelled",
@@ -300,6 +335,22 @@ export class AgentRunner {
         response = ModelResponseSchema.parse(rawResponse);
       } catch {
         const cancelled = isAborted(options.signal);
+        if (this.persistence !== undefined && modelCallId !== undefined) {
+          this.persistence.failModelCall(
+            modelCallId,
+            cancelled ? "cancelled" : "failed",
+            Date.now() - requestStartedAt,
+            {
+              code: cancelled
+                ? "MODEL_CALL_CANCELLED"
+                : "MODEL_CALL_FAILED",
+              message: cancelled
+                ? "The model call was cancelled."
+                : "The model call failed.",
+              details: [],
+            },
+          );
+        }
         return this.createResult({
           taskId,
           status: cancelled ? "cancelled" : "failed",
@@ -309,6 +360,26 @@ export class AgentRunner {
           modelRequests,
           toolCalls,
         });
+      }
+
+      if (this.persistence !== undefined) {
+        try {
+          await this.persistence.completeModelResponse({
+            modelCallId: modelCallId as string,
+            response,
+            durationMs: Date.now() - requestStartedAt,
+          });
+        } catch {
+          return this.createResult({
+            taskId,
+            status: "failed",
+            stopReason: "provider_error",
+            messages,
+            toolResults,
+            modelRequests,
+            toolCalls,
+          });
+        }
       }
 
       messages.push(response.message);
@@ -353,7 +424,13 @@ export class AgentRunner {
       }
 
       if (this.scheduler !== undefined) {
+        const schedulerContext =
+          this.persistence?.createSchedulerContext(executionSignal) ?? {
+            taskId,
+            signal: executionSignal,
+          };
         const scheduled = await this.scheduler.execute(responseToolCalls, {
+          ...schedulerContext,
           taskId,
           signal: executionSignal,
         });
@@ -387,6 +464,18 @@ export class AgentRunner {
             taskId,
             status: "write_outcome_unknown",
             stopReason: "write_outcome_unknown",
+            messages,
+            toolResults,
+            modelRequests,
+            toolCalls,
+          });
+        }
+
+        if (scheduled.termination === "persistence_failed") {
+          return this.createResult({
+            taskId,
+            status: "failed",
+            stopReason: "persistence_failed",
             messages,
             toolResults,
             modelRequests,

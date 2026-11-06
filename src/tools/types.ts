@@ -19,6 +19,7 @@ export type ToolMetadata = z.infer<typeof ToolMetadataSchema>;
 
 export const ToolRegistrationOptionsSchema = z
   .object({
+    version: z.string().trim().min(1).optional(),
     timeoutMs: z.number().int().positive().optional(),
     requiresApproval: z.boolean().optional(),
   })
@@ -28,6 +29,7 @@ export interface ToolExecutionContext {
   taskId: string;
   toolCallId: string;
   signal: AbortSignal;
+  fencingToken?: number;
 }
 
 export interface ValidatedToolInput {
@@ -39,12 +41,14 @@ export interface ValidatedToolInput {
 }
 
 export interface RegisteredToolMetadata extends ToolMetadata {
+  readonly version: string;
   readonly inputSchema: z.ZodType<unknown>;
   readonly timeoutMs: number;
   readonly requiresApproval: boolean;
 }
 
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> extends ToolMetadata {
+  readonly version?: string;
   readonly inputSchema: z.ZodType<TInput>;
   readonly timeoutMs?: number;
   readonly requiresApproval?: boolean;
