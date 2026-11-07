@@ -27,6 +27,14 @@ export {
   ExecutionPlanRepository,
   type CreateExecutionPlanInput,
 } from "./execution-plan-repository.js";
+export {
+  RecoveryEvidenceReadRepository,
+  type CreateRecoveryEvidenceReadInput,
+} from "./recovery-evidence-read-repository.js";
+export {
+  RecoveryLegacyAttestationRepository,
+  type CreateRecoveryLegacyAttestationInput,
+} from "./recovery-legacy-attestation-repository.js";
 export { MessageRepository } from "./message-repository.js";
 export {
   ModelCallRepository,
@@ -42,6 +50,10 @@ export {
   type CreateRecoveryReviewInput,
   type DecideRecoveryReviewRecordInput,
 } from "./recovery-review-repository.js";
+export {
+  RecoveryReviewOperationRepository,
+  type CreateRecoveryReviewOperationInput,
+} from "./recovery-review-operation-repository.js";
 export { TaskRepository, type PersistedTaskInput } from "./task-repository.js";
 export { TaskSnapshotReader } from "./task-snapshot.js";
 export {
@@ -49,6 +61,8 @@ export {
   type BeginOwnedToolRunInput,
   type CompleteOwnedToolRunInput,
   type LeaseOwnershipContext,
+  type RecordRecoveryInspectionInput,
+  type RecordReadRecoveryInput,
   type BeginToolRunInput,
   type CompleteModelCallWithPlanInput,
   type CompleteToolRunInput,

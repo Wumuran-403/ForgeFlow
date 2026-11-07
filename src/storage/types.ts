@@ -62,6 +62,11 @@ export const ExecutionPlanStatusSchema = z.enum([
   "cancelled",
 ]);
 
+export const ExecutionPlanPurposeSchema = z.enum([
+  "agent",
+  "recovery_evidence",
+]);
+
 export const PlanStepKindSchema = z.enum([
   "read_batch",
   "write",
@@ -111,6 +116,34 @@ export const RecoveryReviewStatusSchema = z.enum([
 export const RecoveryReviewSourceSchema = z.enum([
   "manual_review",
   "system_verification",
+]);
+
+export const RecoveryEvidencePayloadTypeSchema = z.enum([
+  "raw_bytes",
+  "json",
+  "external_reference",
+  "readback_result",
+]);
+
+export const RecoveryEvidenceDigestProtocolSchema = z.enum([
+  "sha256-raw-v1",
+  "jcs-sha256-v1",
+  "adapter-content-sha256-v1",
+]);
+
+export const RecoveryLegacyAttestationResultSchema = z.enum([
+  "confirms_original",
+  "contradicts_original",
+  "inconclusive",
+]);
+
+export const RecoveryReviewOperationTypeSchema = z.enum([
+  "submit_evidence",
+  "request_readback",
+  "mark_unresolved",
+  "confirm_succeeded",
+  "confirm_not_executed",
+  "legacy_attest",
 ]);
 
 export const MessageToolCallsSchema = z.array(ToolCallSchema);
@@ -224,6 +257,9 @@ export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 export type MessageRole = z.infer<typeof MessageRoleSchema>;
 export type ModelCallStatus = z.infer<typeof ModelCallStatusSchema>;
 export type ExecutionPlanStatus = z.infer<typeof ExecutionPlanStatusSchema>;
+export type ExecutionPlanPurpose = z.infer<
+  typeof ExecutionPlanPurposeSchema
+>;
 export type PlanStepKind = z.infer<typeof PlanStepKindSchema>;
 export type PlanStepStatus = z.infer<typeof PlanStepStatusSchema>;
 export type ToolRunStatus = z.infer<typeof ToolRunStatusSchema>;
@@ -233,6 +269,18 @@ export type RecoveryReviewStatus = z.infer<
 >;
 export type RecoveryReviewSource = z.infer<
   typeof RecoveryReviewSourceSchema
+>;
+export type RecoveryEvidencePayloadType = z.infer<
+  typeof RecoveryEvidencePayloadTypeSchema
+>;
+export type RecoveryEvidenceDigestProtocol = z.infer<
+  typeof RecoveryEvidenceDigestProtocolSchema
+>;
+export type RecoveryLegacyAttestationResult = z.infer<
+  typeof RecoveryLegacyAttestationResultSchema
+>;
+export type RecoveryReviewOperationType = z.infer<
+  typeof RecoveryReviewOperationTypeSchema
 >;
 export type CreateTaskInput = z.input<typeof CreateTaskInputSchema>;
 export type NewMessageInput = z.input<typeof NewMessageInputSchema>;
@@ -321,6 +369,7 @@ export interface ExecutionPlanRecord {
   readonly taskId: string;
   readonly version: number;
   readonly sourceModelCallId: string;
+  readonly purpose: ExecutionPlanPurpose;
   readonly status: ExecutionPlanStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -387,9 +436,65 @@ export interface RecoveryReviewRecord {
   readonly note: string | null;
   readonly sourceType: RecoveryReviewSource | null;
   readonly evidenceRef: string | null;
+  readonly reviewProtocolVersion: number;
+  readonly decisionVersion: number;
+  readonly evidencePayloadDigest: string | null;
+  readonly evidencePayloadType: RecoveryEvidencePayloadType | null;
+  readonly evidenceDigestProtocol: RecoveryEvidenceDigestProtocol | null;
+  readonly evidenceEnvelopeDigest: string | null;
+  readonly actorId: string | null;
+  readonly verifierId: string | null;
+  readonly verificationId: string | null;
+  readonly sourceObservedAt: string | null;
+  readonly submittedAt: string | null;
+  readonly verifiedAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly decidedAt: string | null;
+}
+
+export interface RecoveryEvidenceReadRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly toolRunId: string;
+  readonly evidenceEnvelopeDigest: string;
+  readonly createdAt: string;
+}
+
+export interface RecoveryLegacyAttestationRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly originalReviewId: string;
+  readonly attestationVersion: number;
+  readonly requestKey: string;
+  readonly evidenceEnvelopeDigest: string;
+  readonly evidenceRef: string;
+  readonly sourceType: RecoveryReviewSource;
+  readonly actorId: string | null;
+  readonly verifierId: string | null;
+  readonly verificationId: string | null;
+  readonly sourceObservedAt: string;
+  readonly submittedAt: string;
+  readonly verifiedAt: string;
+  readonly result: RecoveryLegacyAttestationResult;
+  readonly createdAt: string;
+}
+
+export interface RecoveryReviewOperationRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly requestKey: string;
+  readonly operation: RecoveryReviewOperationType;
+  readonly expectedDecisionVersion: number;
+  readonly resultingDecisionVersion: number;
+  readonly status: string;
+  readonly evidenceEnvelopeDigest: string | null;
+  readonly resultPlanId: string | null;
+  readonly resultToolRunId: string | null;
+  readonly appliedEventId: string | null;
+  readonly createdAt: string;
 }
 
 export interface TaskLeaseRecord {
@@ -411,10 +516,15 @@ export interface TaskSnapshot {
   readonly events: readonly EventRecord[];
   readonly checkpoints: readonly CheckpointRecord[];
   readonly executionPlans: readonly ExecutionPlanRecord[];
+  readonly agentExecutionPlans: readonly ExecutionPlanRecord[];
+  readonly recoveryEvidencePlans: readonly ExecutionPlanRecord[];
   readonly planSteps: readonly PlanStepRecord[];
   readonly toolRuns: readonly ToolRunRecord[];
   readonly approvals: readonly ApprovalRecord[];
   readonly recoveryReviews: readonly RecoveryReviewRecord[];
+  readonly recoveryEvidenceReads: readonly RecoveryEvidenceReadRecord[];
+  readonly recoveryLegacyAttestations: readonly RecoveryLegacyAttestationRecord[];
+  readonly recoveryReviewOperations: readonly RecoveryReviewOperationRecord[];
 }
 
 export const PersistedMessagePayloadSchema = z

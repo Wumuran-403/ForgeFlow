@@ -2,9 +2,13 @@ import type Database from "better-sqlite3";
 
 import { AppError } from "../shared/errors.js";
 import {
+  RecoveryEvidenceDigestProtocolSchema,
+  RecoveryEvidencePayloadTypeSchema,
   RecoveryReviewSourceSchema,
   RecoveryReviewStatusSchema,
   type RecoveryReviewRecord,
+  type RecoveryEvidenceDigestProtocol,
+  type RecoveryEvidencePayloadType,
   type RecoveryReviewSource,
   type RecoveryReviewStatus,
 } from "./types.js";
@@ -22,6 +26,18 @@ interface RecoveryReviewRow {
   note: string | null;
   source_type: string | null;
   evidence_ref: string | null;
+  review_protocol_version: number;
+  decision_version: number;
+  evidence_payload_digest: string | null;
+  evidence_payload_type: string | null;
+  evidence_digest_protocol: string | null;
+  evidence_envelope_digest: string | null;
+  actor_id: string | null;
+  verifier_id: string | null;
+  verification_id: string | null;
+  source_observed_at: string | null;
+  submitted_at: string | null;
+  verified_at: string | null;
   created_at: string;
   updated_at: string;
   decided_at: string | null;
@@ -41,6 +57,28 @@ function mapRecoveryReviewRow(
         ? null
         : RecoveryReviewSourceSchema.parse(row.source_type),
     evidenceRef: row.evidence_ref,
+    reviewProtocolVersion: row.review_protocol_version,
+    decisionVersion: row.decision_version,
+    evidencePayloadDigest: row.evidence_payload_digest,
+    evidencePayloadType:
+      row.evidence_payload_type === null
+        ? null
+        : RecoveryEvidencePayloadTypeSchema.parse(
+            row.evidence_payload_type,
+          ),
+    evidenceDigestProtocol:
+      row.evidence_digest_protocol === null
+        ? null
+        : RecoveryEvidenceDigestProtocolSchema.parse(
+            row.evidence_digest_protocol,
+          ),
+    evidenceEnvelopeDigest: row.evidence_envelope_digest,
+    actorId: row.actor_id,
+    verifierId: row.verifier_id,
+    verificationId: row.verification_id,
+    sourceObservedAt: row.source_observed_at,
+    submittedAt: row.submitted_at,
+    verifiedAt: row.verified_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     decidedAt: row.decided_at,
@@ -53,6 +91,18 @@ export interface CreateRecoveryReviewInput {
   readonly toolRunId: string;
   readonly note: string | null;
   readonly createdAt: string;
+  readonly reviewProtocolVersion?: number;
+  readonly decisionVersion?: number;
+  readonly evidencePayloadDigest?: string | null;
+  readonly evidencePayloadType?: RecoveryEvidencePayloadType | null;
+  readonly evidenceDigestProtocol?: RecoveryEvidenceDigestProtocol | null;
+  readonly evidenceEnvelopeDigest?: string | null;
+  readonly actorId?: string | null;
+  readonly verifierId?: string | null;
+  readonly verificationId?: string | null;
+  readonly sourceObservedAt?: string | null;
+  readonly submittedAt?: string | null;
+  readonly verifiedAt?: string | null;
 }
 
 export interface DecideRecoveryReviewRecordInput {
@@ -77,8 +127,21 @@ export class RecoveryReviewRepository {
         `
           INSERT INTO recovery_reviews (
             id, task_id, tool_run_id, status, note,
+            review_protocol_version, decision_version,
+            evidence_payload_digest, evidence_payload_type,
+            evidence_digest_protocol, evidence_envelope_digest,
+            actor_id, verifier_id, verification_id,
+            source_observed_at, submitted_at, verified_at,
             created_at, updated_at
-          ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+          ) VALUES (
+            ?, ?, ?, 'pending', ?,
+            ?, ?,
+            ?, ?,
+            ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?
+          )
         `,
       )
       .run(
@@ -86,6 +149,18 @@ export class RecoveryReviewRepository {
         input.taskId,
         input.toolRunId,
         input.note,
+        input.reviewProtocolVersion ?? 0,
+        input.decisionVersion ?? 0,
+        input.evidencePayloadDigest ?? null,
+        input.evidencePayloadType ?? null,
+        input.evidenceDigestProtocol ?? null,
+        input.evidenceEnvelopeDigest ?? null,
+        input.actorId ?? null,
+        input.verifierId ?? null,
+        input.verificationId ?? null,
+        input.sourceObservedAt ?? null,
+        input.submittedAt ?? null,
+        input.verifiedAt ?? null,
         input.createdAt,
         input.createdAt,
       );
@@ -108,7 +183,9 @@ export class RecoveryReviewRepository {
               evidence_ref = ?,
               decided_at = ?,
               updated_at = ?
-          WHERE id = ? AND status IN ('pending', 'unresolved')
+          WHERE id = ?
+            AND status IN ('pending', 'unresolved')
+            AND review_protocol_version = 0
         `,
       )
       .run(

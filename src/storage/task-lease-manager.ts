@@ -10,7 +10,6 @@ import { SequenceAllocator } from "./sequences.js";
 import {
   TaskLeaseRepository,
 } from "./task-lease-repository.js";
-import { TaskRepository } from "./task-repository.js";
 import { runInTransaction } from "./transaction.js";
 import type { TaskLeaseRecord, TaskStatus } from "./types.js";
 import { createStorageWritePermit } from "./write-boundary.js";
@@ -50,7 +49,6 @@ const TERMINAL_TASK_STATUSES = new Set<TaskStatus>([
 ]);
 
 export class TaskLeaseManager {
-  private readonly tasks: TaskRepository;
   private readonly leases: TaskLeaseRepository;
   private readonly events: EventRepository;
   private readonly checkpoints: CheckpointStore;
@@ -72,7 +70,6 @@ export class TaskLeaseManager {
       });
     }
     this.now = options.now ?? (() => new Date());
-    this.tasks = new TaskRepository(database);
     this.leases = new TaskLeaseRepository(database);
     this.sequences = new SequenceAllocator(database);
     this.events = new EventRepository(database, this.sequences);
@@ -97,7 +94,7 @@ export class TaskLeaseManager {
       this.database,
       () => {
         const permit = createStorageWritePermit(this.database);
-        const task = this.tasks.get(parsed.taskId);
+        const task = this.getTaskLeaseView(parsed.taskId);
         if (TERMINAL_TASK_STATUSES.has(task.status)) {
           throw new AppError({
             code: "TASK_LEASE_TASK_TERMINAL",
@@ -172,7 +169,7 @@ export class TaskLeaseManager {
       this.database,
       () => {
         const permit = createStorageWritePermit(this.database);
-        const task = this.tasks.get(parsed.taskId);
+        const task = this.getTaskLeaseView(parsed.taskId);
         const lease = this.leases.heartbeat(
           parsed.taskId,
           parsed.leaseToken,
@@ -242,7 +239,7 @@ export class TaskLeaseManager {
       this.database,
       () => {
         const permit = createStorageWritePermit(this.database);
-        const task = this.tasks.get(parsed.taskId);
+        const task = this.getTaskLeaseView(parsed.taskId);
         const lease = this.leases.release(
           parsed.taskId,
           parsed.leaseToken,
@@ -305,7 +302,7 @@ export class TaskLeaseManager {
     eventSequence: number,
     permit: ReturnType<typeof createStorageWritePermit>,
   ): void {
-    const task = this.tasks.get(taskId);
+    const task = this.getTaskLeaseView(taskId);
     const latestMessage = this.database
       .prepare(
         `
@@ -320,7 +317,7 @@ export class TaskLeaseManager {
         `
           SELECT MAX(version) AS version
           FROM execution_plans
-          WHERE task_id = ?
+          WHERE task_id = ? AND purpose = 'agent'
         `,
       )
       .get(taskId) as { version: number | null };
@@ -342,6 +339,51 @@ export class TaskLeaseManager {
       now,
       permit,
     );
+  }
+
+  private getTaskLeaseView(taskId: string): {
+    id: string;
+    traceId: string;
+    status: TaskStatus;
+    currentIteration: number;
+    maxModelTurns: number;
+    maxToolCalls: number;
+  } {
+    const row = this.database
+      .prepare(
+        `
+          SELECT id, trace_id, status, current_iteration,
+                 max_model_turns, max_tool_calls
+          FROM tasks
+          WHERE id = ?
+        `,
+      )
+      .get(taskId) as
+      | {
+          id: string;
+          trace_id: string;
+          status: TaskStatus;
+          current_iteration: number;
+          max_model_turns: number;
+          max_tool_calls: number;
+        }
+      | undefined;
+    if (row === undefined) {
+      throw new AppError({
+        code: "TASK_NOT_FOUND",
+        message: "Task was not found.",
+        statusCode: 404,
+        details: [],
+      });
+    }
+    return {
+      id: row.id,
+      traceId: row.trace_id,
+      status: row.status,
+      currentIteration: row.current_iteration,
+      maxModelTurns: row.max_model_turns,
+      maxToolCalls: row.max_tool_calls,
+    };
   }
 
   private notOwnedError(): AppError {

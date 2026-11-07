@@ -49,6 +49,9 @@ describe("storage schema through Step 4", () => {
       "messages",
       "model_calls",
       "plan_steps",
+      "recovery_evidence_reads",
+      "recovery_legacy_attestations",
+      "recovery_review_operations",
       "recovery_reviews",
       "schema_migrations",
       "task_leases",
@@ -206,12 +209,12 @@ describe("storage schema through Step 4", () => {
     database = openDatabase(temporaryDatabase.path);
 
     expect(migrateStorage(database)).toMatchObject({
-      appliedVersions: [1, 2, 3],
-      currentVersion: 3,
+      appliedVersions: [1, 2, 3, 4],
+      currentVersion: 4,
     });
     expect(migrateStorage(database)).toMatchObject({
       appliedVersions: [],
-      currentVersion: 3,
+      currentVersion: 4,
     });
   });
 });

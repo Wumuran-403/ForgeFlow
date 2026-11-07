@@ -30,6 +30,7 @@ import {
   PersistedErrorSchema,
   PlanStepKindSchema,
   PlanStepStatusSchema,
+  TaskStatusSchema,
   UpdateTaskStatusInputSchema,
   type BeginModelCallInput,
   type CompleteModelCallInput,
@@ -239,6 +240,29 @@ const FinalizeOwnedToolRunBeforeStartInputSchema = z
   })
   .strict();
 
+const RecordRecoveryInspectionInputSchema = z
+  .object({
+    ownership: OwnedLeaseContextSchema,
+    expectedTaskVersion: z.number().int().positive(),
+    classification: z.string().min(1),
+    findingCount: z.number().int().nonnegative(),
+    recommendedNextAction: z.string().min(1),
+    inspectedAt: z.string().min(1),
+  })
+  .strict();
+
+const RecordReadRecoveryInputSchema = z
+  .object({
+    ownership: OwnedLeaseContextSchema,
+    expectedTaskVersion: z.number().int().positive(),
+    requeuedCount: z.number().int().nonnegative(),
+    attemptedCount: z.number().int().nonnegative(),
+    succeededCount: z.number().int().nonnegative(),
+    failedCount: z.number().int().nonnegative(),
+    inspectedAt: z.string().min(1),
+  })
+  .strict();
+
 export type CompleteModelCallWithPlanInput = z.input<
   typeof CompleteModelCallWithPlanInputSchema
 >;
@@ -260,6 +284,12 @@ export type CompleteOwnedToolRunInput = z.input<
 >;
 export type FinalizeOwnedToolRunBeforeStartInput = z.input<
   typeof FinalizeOwnedToolRunBeforeStartInputSchema
+>;
+export type RecordRecoveryInspectionInput = z.input<
+  typeof RecordRecoveryInspectionInputSchema
+>;
+export type RecordReadRecoveryInput = z.input<
+  typeof RecordReadRecoveryInputSchema
 >;
 export type LeaseOwnershipContext = {
   readonly taskId: string;
@@ -361,6 +391,7 @@ export class ExecutionUnitOfWork {
   beginModelCall(
     input: BeginModelCallInput,
     ownership?: LeaseOwnershipContext,
+    assertAuthority?: () => void,
   ): ModelCallRecord {
     const parsed = BeginModelCallInputSchema.parse(input);
     const now = nowIso();
@@ -368,6 +399,7 @@ export class ExecutionUnitOfWork {
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         if (ownership !== undefined) {
           this.assertOwnedTask(ownership);
@@ -429,6 +461,7 @@ export class ExecutionUnitOfWork {
   completeModelCall(
     input: CompleteModelCallInput,
     ownership?: LeaseOwnershipContext,
+    assertAuthority?: () => void,
   ): TaskSnapshot {
     const parsed = CompleteModelCallInputSchema.parse(input);
     const now = nowIso();
@@ -436,6 +469,7 @@ export class ExecutionUnitOfWork {
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         if (ownership !== undefined) {
           this.assertOwnedTask(ownership);
@@ -500,6 +534,7 @@ export class ExecutionUnitOfWork {
   failModelCall(
     input: FailModelCallInput,
     ownership?: LeaseOwnershipContext,
+    assertAuthority?: () => void,
   ): TaskSnapshot {
     const parsed = FailModelCallInputSchema.parse(input);
     const now = nowIso();
@@ -507,6 +542,7 @@ export class ExecutionUnitOfWork {
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         if (ownership !== undefined) {
           this.assertOwnedTask(ownership);
@@ -618,6 +654,7 @@ export class ExecutionUnitOfWork {
   completeModelCallWithPlan(
     input: CompleteModelCallWithPlanInput,
     ownership?: LeaseOwnershipContext,
+    assertAuthority?: () => void,
   ): TaskSnapshot {
     const parsed = CompleteModelCallWithPlanInputSchema.parse(input);
     const now = nowIso();
@@ -625,6 +662,7 @@ export class ExecutionUnitOfWork {
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         if (ownership !== undefined) {
           this.assertOwnedTask(ownership);
@@ -1360,13 +1398,17 @@ export class ExecutionUnitOfWork {
     );
   }
 
-  beginOwnedToolRun(input: BeginOwnedToolRunInput): TaskSnapshot {
+  beginOwnedToolRun(
+    input: BeginOwnedToolRunInput,
+    assertAuthority?: () => void,
+  ): TaskSnapshot {
     const parsed = BeginOwnedToolRunInputSchema.parse(input);
     const now = nowIso();
 
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         const task = this.assertOwnedTask(parsed.ownership);
         if (task.status !== "running") {
@@ -1448,13 +1490,17 @@ export class ExecutionUnitOfWork {
     );
   }
 
-  completeOwnedToolRun(input: CompleteOwnedToolRunInput): TaskSnapshot {
+  completeOwnedToolRun(
+    input: CompleteOwnedToolRunInput,
+    assertAuthority?: () => void,
+  ): TaskSnapshot {
     const parsed = CompleteOwnedToolRunInputSchema.parse(input);
     const now = nowIso();
 
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         const task = this.assertOwnedTask(parsed.ownership);
         const current = this.toolRuns.get(parsed.toolRunId);
@@ -1577,6 +1623,7 @@ export class ExecutionUnitOfWork {
 
   finalizeOwnedToolRunBeforeStart(
     input: FinalizeOwnedToolRunBeforeStartInput,
+    assertAuthority?: () => void,
   ): TaskSnapshot {
     const parsed = FinalizeOwnedToolRunBeforeStartInputSchema.parse(input);
     const now = nowIso();
@@ -1584,6 +1631,7 @@ export class ExecutionUnitOfWork {
     return runInTransaction(
       this.database,
       () => {
+        assertAuthority?.();
         const permit = createStorageWritePermit(this.database);
         const task = this.assertOwnedTask(parsed.ownership);
         const current = this.toolRuns.get(parsed.toolRunId);
@@ -1666,6 +1714,255 @@ export class ExecutionUnitOfWork {
             metadata: { toolRunId: finalized.id, status: finalized.status },
           },
           now,
+          permit,
+        );
+        return this.snapshotReader.load(task.id);
+      },
+      "immediate",
+    );
+  }
+
+  recordRecoveryInspection(
+    input: RecordRecoveryInspectionInput,
+  ): TaskSnapshot {
+    const parsed = RecordRecoveryInspectionInputSchema.parse(input);
+
+    return runInTransaction(
+      this.database,
+      () => {
+        const permit = createStorageWritePermit(this.database);
+        const task = this.assertOwnedTask(parsed.ownership);
+        if (task.version !== parsed.expectedTaskVersion) {
+          throw new AppError({
+            code: "TASK_STATE_CONFLICT",
+            message: "Task changed before recovery inspection was recorded.",
+            statusCode: 409,
+            details: [],
+          });
+        }
+        const event = this.events.append(
+          {
+            taskId: task.id,
+            traceId: task.traceId,
+            type: "recovery.inspected",
+            entityType: "task",
+            entityId: task.id,
+            payload: {
+              classification: parsed.classification,
+              findingCount: parsed.findingCount,
+              recommendedNextAction: parsed.recommendedNextAction,
+              fencingToken: parsed.ownership.fencingToken,
+            },
+          },
+          parsed.inspectedAt,
+          permit,
+        );
+        const latest = this.snapshotReader.load(task.id);
+        const latestPlan = this.plans.listAgentByTask(task.id).at(-1);
+        this.checkpoints.append(
+          {
+            taskId: task.id,
+            reason: "recovery_inspected",
+            taskStatus: task.status,
+            lastMessageSequence: latest.messages.at(-1)?.sequence ?? 0,
+            modelIteration: task.currentIteration,
+            planVersion: latestPlan?.version ?? null,
+            lastEventSequence: event.sequence,
+            budget: checkpointBudget(task),
+            metadata: {
+              classification: parsed.classification,
+              findingCount: parsed.findingCount,
+            },
+          },
+          parsed.inspectedAt,
+          permit,
+        );
+        return this.snapshotReader.load(task.id);
+      },
+      "immediate",
+    );
+  }
+
+  recordRecoveryInspectionWithoutSnapshot(
+    input: RecordRecoveryInspectionInput,
+  ): void {
+    const parsed = RecordRecoveryInspectionInputSchema.parse(input);
+
+    runInTransaction(
+      this.database,
+      () => {
+        const permit = createStorageWritePermit(this.database);
+        if (this.leaseManager === undefined) {
+          throw new AppError({
+            code: "TASK_LEASE_REQUIRED",
+            message: "Persistent execution requires an owned task lease.",
+            statusCode: 409,
+            details: [],
+          });
+        }
+        this.leaseManager.assertOwned(
+          parsed.ownership.taskId,
+          parsed.ownership.leaseToken,
+          parsed.ownership.fencingToken,
+        );
+        const task = this.database
+          .prepare(
+            `
+              SELECT id, trace_id, status, current_iteration,
+                     max_model_turns, max_tool_calls, version
+              FROM tasks
+              WHERE id = ?
+            `,
+          )
+          .get(parsed.ownership.taskId) as
+          | {
+              id: string;
+              trace_id: string;
+              status: string;
+              current_iteration: number;
+              max_model_turns: number;
+              max_tool_calls: number;
+              version: number;
+            }
+          | undefined;
+        if (task === undefined) {
+          throw new AppError({
+            code: "TASK_NOT_FOUND",
+            message: "Task was not found.",
+            statusCode: 404,
+            details: [],
+          });
+        }
+        if (task.version !== parsed.expectedTaskVersion) {
+          throw new AppError({
+            code: "TASK_STATE_CONFLICT",
+            message: "Task changed before recovery inspection was recorded.",
+            statusCode: 409,
+            details: [],
+          });
+        }
+        const taskStatus = TaskStatusSchema.parse(task.status);
+        const event = this.events.append(
+          {
+            taskId: task.id,
+            traceId: task.trace_id,
+            type: "recovery.inspected",
+            entityType: "task",
+            entityId: task.id,
+            payload: {
+              classification: parsed.classification,
+              findingCount: parsed.findingCount,
+              recommendedNextAction: parsed.recommendedNextAction,
+              fencingToken: parsed.ownership.fencingToken,
+            },
+          },
+          parsed.inspectedAt,
+          permit,
+        );
+        const latestMessage = this.database
+          .prepare(
+            `
+              SELECT COALESCE(MAX(sequence), 0) AS sequence
+              FROM messages
+              WHERE task_id = ?
+            `,
+          )
+          .get(task.id) as { sequence: number };
+        const latestPlan = this.database
+          .prepare(
+            `
+              SELECT MAX(version) AS version
+              FROM execution_plans
+              WHERE task_id = ? AND purpose = 'agent'
+            `,
+          )
+          .get(task.id) as { version: number | null };
+        this.checkpoints.append(
+          {
+            taskId: task.id,
+            reason: "recovery_inspected",
+            taskStatus,
+            lastMessageSequence: latestMessage.sequence,
+            modelIteration: task.current_iteration,
+            planVersion: latestPlan.version,
+            lastEventSequence: event.sequence,
+            budget: {
+              maxModelTurns: task.max_model_turns,
+              maxToolCalls: task.max_tool_calls,
+            },
+            metadata: {
+              classification: parsed.classification,
+              findingCount: parsed.findingCount,
+            },
+          },
+          parsed.inspectedAt,
+          permit,
+        );
+      },
+      "immediate",
+    );
+  }
+
+  recordReadRecovery(
+    input: RecordReadRecoveryInput,
+    assertAuthority?: () => void,
+  ): TaskSnapshot {
+    const parsed = RecordReadRecoveryInputSchema.parse(input);
+    return runInTransaction(
+      this.database,
+      () => {
+        assertAuthority?.();
+        const permit = createStorageWritePermit(this.database);
+        const task = this.assertOwnedTask(parsed.ownership);
+        if (task.version !== parsed.expectedTaskVersion) {
+          throw new AppError({
+            code: "TASK_STATE_CONFLICT",
+            message: "Task changed before read recovery was recorded.",
+            statusCode: 409,
+            details: [],
+          });
+        }
+        const event = this.events.append(
+          {
+            taskId: task.id,
+            traceId: task.traceId,
+            type:
+              parsed.requeuedCount > 0
+                ? "recovery.read_retried"
+                : "recovery.read_completed",
+            entityType: "task",
+            entityId: task.id,
+            payload: {
+              requeuedCount: parsed.requeuedCount,
+              attemptedCount: parsed.attemptedCount,
+              succeededCount: parsed.succeededCount,
+              failedCount: parsed.failedCount,
+              fencingToken: parsed.ownership.fencingToken,
+            },
+          },
+          parsed.inspectedAt,
+          permit,
+        );
+        const latest = this.snapshotReader.load(task.id);
+        const latestPlan = this.plans.listAgentByTask(task.id).at(-1);
+        this.checkpoints.append(
+          {
+            taskId: task.id,
+            reason: "recovery_read_completed",
+            taskStatus: task.status,
+            lastMessageSequence: latest.messages.at(-1)?.sequence ?? 0,
+            modelIteration: task.currentIteration,
+            planVersion: latestPlan?.version ?? null,
+            lastEventSequence: event.sequence,
+            budget: checkpointBudget(task),
+            metadata: {
+              requeuedCount: parsed.requeuedCount,
+              attemptedCount: parsed.attemptedCount,
+              succeededCount: parsed.succeededCount,
+              failedCount: parsed.failedCount,
+            },
+          },
+          parsed.inspectedAt,
           permit,
         );
         return this.snapshotReader.load(task.id);

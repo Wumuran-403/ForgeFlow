@@ -13,6 +13,7 @@ import type {
   TaskSchedulerContext,
   ToolExecutionPersistence,
 } from "../scheduler/index.js";
+import { ExecutionAuthority } from "./lease-heartbeat.js";
 import { assertCanonicalJsonValue } from "../shared/canonical-json.js";
 import { AppError } from "../shared/errors.js";
 import {
@@ -34,7 +35,7 @@ interface BridgeOptions {
   readonly database: ForgeFlowDatabase;
   readonly leaseManager: TaskLeaseManager;
   readonly stateMachine: ExecutionStateMachine;
-  readonly scheduler: TaskScheduler;
+  readonly scheduler?: TaskScheduler;
   readonly registry: ToolRegistry;
   readonly snapshot: TaskSnapshot;
   readonly ownership: {
@@ -42,6 +43,7 @@ interface BridgeOptions {
     readonly leaseToken: string;
     readonly fencingToken: number;
   };
+  readonly authority: ExecutionAuthority;
 }
 
 export class PersistentExecutionBridge
@@ -73,11 +75,13 @@ export class PersistentExecutionBridge
   }
 
   beginModelCall(request: ModelRequest, iteration: number): string {
+    this.options.authority.assertActive();
     const call = this.unitOfWork.beginModelCall({
       taskId: this.taskId,
       iteration,
       request,
-    }, this.ownershipContext());
+    }, this.ownershipContext(), () =>
+      this.options.authority.assertActive());
     this.refresh();
     return call.id;
   }
@@ -88,12 +92,14 @@ export class PersistentExecutionBridge
     durationMs: number,
     error: AgentToolError,
   ): void {
+    this.options.authority.assertActive();
     this.unitOfWork.failModelCall({
       modelCallId,
       status,
       durationMs,
       error: toPersistedError(error),
-    }, this.ownershipContext());
+    }, this.ownershipContext(), () =>
+      this.options.authority.assertActive());
     this.refresh();
   }
 
@@ -102,6 +108,15 @@ export class PersistentExecutionBridge
     readonly response: ModelResponse;
     readonly durationMs: number;
   }): Promise<void> {
+    this.options.authority.assertActive();
+    if (this.options.scheduler === undefined) {
+      throw new AppError({
+        code: "SCHEDULER_REQUIRED",
+        message: "A scheduler is required to persist model execution plans.",
+        statusCode: 500,
+        details: [],
+      });
+    }
     const toolCalls = input.response.message.toolCalls ?? [];
     if (toolCalls.length === 0) {
       this.schedulePlan = undefined;
@@ -110,7 +125,8 @@ export class PersistentExecutionBridge
         modelCallId: input.modelCallId,
         response: input.response,
         durationMs: input.durationMs,
-      }, this.ownershipContext());
+      }, this.ownershipContext(), () =>
+        this.options.authority.assertActive());
       this.refresh();
       return;
     }
@@ -172,7 +188,8 @@ export class PersistentExecutionBridge
         steps: planSteps,
         toolRuns,
       },
-    }, this.ownershipContext());
+    }, this.ownershipContext(), () =>
+      this.options.authority.assertActive());
     this.schedulePlan = plan;
     this.validatedInputs = validatedInputs;
     this.refresh();
@@ -191,6 +208,7 @@ export class PersistentExecutionBridge
   }
 
   finishRun(result: AgentRunResult): void {
+    this.options.authority.assertActive();
     const snapshot = this.snapshotReader.load(this.taskId);
     if (result.status === "write_outcome_unknown") {
       return;
@@ -228,6 +246,7 @@ export class PersistentExecutionBridge
   }
 
   beforeExecute(task: { readonly toolCallId: string }): void {
+    this.options.authority.assertActive();
     const run = this.findToolRun(task.toolCallId);
     if (run.status !== "queued") {
       throw new AppError({
@@ -241,7 +260,7 @@ export class PersistentExecutionBridge
       toolRunId: run.id,
       expectedToolRunVersion: run.version,
       ownership: this.ownershipContext(),
-    });
+    }, () => this.options.authority.assertActive());
     this.refresh();
   }
 
@@ -253,6 +272,7 @@ export class PersistentExecutionBridge
       readonly error?: AgentToolError;
     },
   ): void {
+    this.options.authority.assertActive();
     let status = result.status;
     let output = result.output;
     let error = result.error;
@@ -277,7 +297,7 @@ export class PersistentExecutionBridge
       ...(output === undefined ? {} : { output: output as never }),
       ...(error === undefined ? {} : { error: toPersistedError(error) }),
       ownership: this.ownershipContext(),
-    });
+    }, () => this.options.authority.assertActive());
     this.refresh();
   }
 
@@ -289,6 +309,7 @@ export class PersistentExecutionBridge
       readonly error?: AgentToolError;
     },
   ): void {
+    this.options.authority.assertActive();
     const run = this.findToolRun(task.toolCallId);
     if (run.status === "unknown" && result.status === "unknown") {
       return;
@@ -315,7 +336,7 @@ export class PersistentExecutionBridge
               }
             : toPersistedError(result.error),
         ownership: this.ownershipContext(),
-      });
+      }, () => this.options.authority.assertActive());
       this.refresh();
       return;
     }
@@ -333,7 +354,7 @@ export class PersistentExecutionBridge
           ? {}
           : { error: toPersistedError(result.error) }),
         ownership: this.ownershipContext(),
-      });
+      }, () => this.options.authority.assertActive());
       this.refresh();
       if (result.status !== "succeeded" && status !== "unknown") {
         throw new AppError({
@@ -359,7 +380,7 @@ export class PersistentExecutionBridge
           details: [],
         },
         ownership: this.ownershipContext(),
-      });
+      }, () => this.options.authority.assertActive());
       this.refresh();
       throw error;
     }

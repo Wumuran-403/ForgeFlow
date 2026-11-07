@@ -686,7 +686,7 @@ export class ExecutionStateMachine {
         `
           SELECT MAX(version) AS version
           FROM execution_plans
-          WHERE task_id = ?
+          WHERE task_id = ? AND purpose = 'agent'
         `,
       )
       .get(taskId) as { version: number | null };

@@ -14,6 +14,10 @@ import {
 } from "../storage/index.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { PersistentExecutionBridge } from "./execution-bridge.js";
+import {
+  ExecutionAuthority,
+  LeaseHeartbeat,
+} from "./lease-heartbeat.js";
 import { assertSafeToStartPersistentRun } from "./recovery-gate.js";
 
 export interface PersistenceCoordinatorOptions {
@@ -65,10 +69,12 @@ export class PersistenceCoordinator {
       leaseToken: lease.leaseToken as string,
       fencingToken: lease.fencingToken,
     };
+    const authority = new ExecutionAuthority();
     const heartbeat = new LeaseHeartbeat(
       this.options.leaseManager,
       ownership,
       this.heartbeatIntervalMs,
+      authority,
     );
     heartbeat.start();
     const executionSignal =
@@ -79,9 +85,12 @@ export class PersistenceCoordinator {
     let failure: unknown;
 
     try {
-      result = await this.executeOwned(taskId, ownership, {
-        signal: executionSignal,
-      });
+      result = await this.executeOwned(
+        taskId,
+        ownership,
+        authority,
+        { signal: executionSignal },
+      );
       if (heartbeat.failure !== undefined) {
         throw new AppError({
           code: "TASK_LEASE_HEARTBEAT_FAILED",
@@ -92,7 +101,16 @@ export class PersistenceCoordinator {
         });
       }
     } catch (error) {
-      failure = error;
+      failure =
+        heartbeat.failure === undefined
+          ? error
+          : new AppError({
+              code: "TASK_LEASE_HEARTBEAT_FAILED",
+              message: "Task lease heartbeat failed during persistent execution.",
+              statusCode: 409,
+              details: [],
+              cause: heartbeat.failure,
+            });
     }
     await heartbeat.stop();
 
@@ -150,7 +168,12 @@ export class PersistenceCoordinator {
       ownership.leaseToken,
       ownership.fencingToken,
     );
-    return this.executeOwned(taskId, ownership, runOptions);
+    return this.executeOwned(
+      taskId,
+      ownership,
+      new ExecutionAuthority(),
+      runOptions,
+    );
   }
 
   private async executeOwned(
@@ -160,6 +183,7 @@ export class PersistenceCoordinator {
       readonly leaseToken: string;
       readonly fencingToken: number;
     },
+    authority: ExecutionAuthority,
     runOptions: AgentRunOptions,
   ): Promise<AgentRunResult> {
     let snapshot = this.snapshotReader.load(taskId);
@@ -190,6 +214,7 @@ export class PersistenceCoordinator {
       registry: this.options.registry,
       snapshot,
       ownership,
+      authority,
     });
     const runner = new AgentRunner({
       provider: this.options.provider,
@@ -207,63 +232,5 @@ export class PersistenceCoordinator {
       { objective: snapshot.task.objective } satisfies AgentRunInput,
       runOptions,
     );
-  }
-}
-
-class LeaseHeartbeat {
-  private timer: ReturnType<typeof setInterval> | undefined;
-  private readonly abortController = new AbortController();
-  private heartbeatFailure: unknown;
-
-  constructor(
-    private readonly manager: TaskLeaseManager,
-    private readonly ownership: {
-      readonly taskId: string;
-      readonly leaseToken: string;
-      readonly fencingToken: number;
-    },
-    private readonly intervalMs: number,
-  ) {}
-
-  get signal(): AbortSignal {
-    return this.abortController.signal;
-  }
-
-  get failure(): unknown {
-    return this.heartbeatFailure;
-  }
-
-  start(): void {
-    this.timer = setInterval(() => {
-      try {
-        this.manager.heartbeat(
-          this.ownership.taskId,
-          this.ownership.leaseToken,
-          this.ownership.fencingToken,
-        );
-      } catch (error) {
-        this.fail(error);
-      }
-    }, this.intervalMs);
-    this.timer.unref?.();
-  }
-
-  async stop(): Promise<void> {
-    if (this.timer !== undefined) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
-  }
-
-  private fail(error: unknown): void {
-    if (this.heartbeatFailure !== undefined) {
-      return;
-    }
-    this.heartbeatFailure = error;
-    if (this.timer !== undefined) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
-    this.abortController.abort(error);
   }
 }

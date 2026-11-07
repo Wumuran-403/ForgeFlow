@@ -37,6 +37,7 @@ describe("Step 3 execution schema", () => {
         "task_id",
         "version",
         "source_model_call_id",
+        "purpose",
         "status",
         "created_at",
         "updated_at",

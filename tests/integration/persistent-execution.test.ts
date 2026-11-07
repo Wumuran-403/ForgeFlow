@@ -934,7 +934,7 @@ describe("persistent AgentRunner and TaskScheduler integration", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("maps a started Write to unknown when Heartbeat ownership fails", async () => {
+  it("prevents a started Write from committing after Heartbeat ownership fails", async () => {
     const activeDatabase = database as ForgeFlowDatabase;
     createTask(activeDatabase, "task-write-heartbeat");
     const manager = new TaskLeaseManager(activeDatabase, {
@@ -985,8 +985,11 @@ describe("persistent AgentRunner and TaskScheduler integration", () => {
     const snapshot = new TaskSnapshotReader(activeDatabase).load(
       "task-write-heartbeat",
     );
-    expect(snapshot.task.status).toBe("waiting_review");
-    expect(snapshot.toolRuns[0]?.status).toBe("unknown");
+    expect(snapshot.task.status).toBe("running");
+    expect(snapshot.toolRuns[0]?.status).toBe("running");
+    expect(
+      snapshot.messages.some((message) => message.role === "tool"),
+    ).toBe(false);
   });
 
   it("cleans up the Lease after Provider and Scheduler exceptions", async () => {
