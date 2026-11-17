@@ -1,0 +1,6 @@
+{$FORGEFLOW_DOMAIN} {
+	encode zstd gzip
+	@internal path /internal/* /recovery/* /api/internal/* /api/recovery/*
+	respond @internal 404
+	reverse_proxy web:8787
+}

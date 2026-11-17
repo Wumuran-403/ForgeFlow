@@ -10,6 +10,7 @@ import {
   ToolRegistryLockedError,
   ToolValidatedInputInvalidError,
 } from "./errors.js";
+import { computeToolInputSchemaHash } from "./fingerprint.js";
 import {
   DEFAULT_TOOL_TIMEOUT_MS,
   ToolMetadataSchema,
@@ -107,10 +108,23 @@ export class ToolRegistry {
       throw new ToolAlreadyRegisteredError(metadata.name);
     }
 
+    let inputSchemaHash: string;
+    try {
+      inputSchemaHash = computeToolInputSchemaHash(definition.inputSchema);
+    } catch {
+      throw new ToolDefinitionInvalidError(metadata.name, [
+        {
+          path: "inputSchema",
+          message: "Tool input schema must be representable as canonical JSON Schema.",
+        },
+      ]);
+    }
+
     const registeredMetadata: RegisteredToolMetadata = Object.freeze({
       ...metadata,
       version: options.version ?? "1",
       inputSchema: definition.inputSchema,
+      inputSchemaHash,
       timeoutMs: options.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
       requiresApproval:
         options.requiresApproval ?? metadata.mode === "write",
@@ -216,6 +230,8 @@ export class ToolRegistry {
     deepFreeze(value);
     const validatedInput: ValidatedToolInput = Object.freeze({
       toolName: name,
+      toolVersion: tool.metadata.version,
+      inputSchemaHash: tool.metadata.inputSchemaHash,
       mode: tool.metadata.mode,
       timeoutMs: tool.metadata.timeoutMs,
       requiresApproval: tool.metadata.requiresApproval,

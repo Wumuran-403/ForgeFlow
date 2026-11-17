@@ -7,6 +7,8 @@ export const STM32_TOOL_NAMES = {
   bomGetItems: "bom_get_items",
   inventoryLookup: "inventory_lookup",
   componentGetSpec: "component_get_spec",
+  procurementCreateDraft: "procurement_create_draft",
+  procurementGetDrafts: "procurement_get_drafts",
 } as const;
 
 const bomLines = [
@@ -103,6 +105,24 @@ const checkPartSpecInputSchema = z
   })
   .strict();
 
+const createProcurementDraftInputSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            partNumber: z.string().trim().min(1),
+            quantity: z.number().int().positive(),
+            reason: z.string().trim().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
+
+const getProcurementDraftsInputSchema = z.object({}).strict();
+
 const inspectBomTool: ToolDefinition<Record<string, never>> = {
   name: STM32_TOOL_NAMES.bomGetItems,
   description: "Inspect the bundled STM32F103C8T6 demo BOM and validate required fields.",
@@ -170,6 +190,78 @@ const checkPartSpecTool: ToolDefinition<z.infer<typeof checkPartSpecInputSchema>
     };
   },
 };
+
+export interface Stm32ProcurementDraft {
+  readonly id: string;
+  readonly status: "draft";
+  readonly items: readonly {
+    readonly partNumber: string;
+    readonly quantity: number;
+    readonly reason: string;
+  }[];
+  readonly createdAt: string;
+}
+
+export interface Stm32DemoRuntime {
+  readonly registry: ToolRegistry;
+  readonly drafts: readonly Stm32ProcurementDraft[];
+}
+
+export function createStm32DemoRuntime(options?: {
+  readonly now?: () => Date;
+}): Stm32DemoRuntime {
+  const registry = createStm32F103C8T6Registry();
+  const drafts: Stm32ProcurementDraft[] = [];
+  const now = options?.now ?? (() => new Date());
+
+  const createDraftTool: ToolDefinition<
+    z.infer<typeof createProcurementDraftInputSchema>
+  > = {
+    name: STM32_TOOL_NAMES.procurementCreateDraft,
+    description:
+      "Create a local simulated procurement draft. This is a write tool and requires approval.",
+    mode: "write",
+    inputSchema: createProcurementDraftInputSchema,
+    requiresApproval: true,
+    execute: ({ items }) => {
+      const draft: Stm32ProcurementDraft = {
+        id: `draft-${drafts.length + 1}`,
+        status: "draft",
+        items,
+        createdAt: now().toISOString(),
+      };
+      drafts.push(draft);
+      return {
+        draft,
+        approval: "approved",
+        message: "Simulated procurement draft created locally.",
+      };
+    },
+  };
+
+  const listDraftsTool: ToolDefinition<Record<string, never>> = {
+    name: STM32_TOOL_NAMES.procurementGetDrafts,
+    description: "Read locally created simulated procurement drafts.",
+    mode: "read",
+    inputSchema: getProcurementDraftsInputSchema,
+    execute: () => ({
+      drafts,
+      count: drafts.length,
+    }),
+  };
+
+  registry.register(createDraftTool);
+  registry.register(listDraftsTool);
+  return {
+    registry,
+    get drafts() {
+      return drafts.map((draft) => ({
+        ...draft,
+        items: draft.items.map((item) => ({ ...item })),
+      }));
+    },
+  };
+}
 
 export function createStm32F103C8T6Registry(): ToolRegistry {
   const registry = new ToolRegistry();

@@ -26,10 +26,18 @@ import {
   type TaskSnapshot,
 } from "../storage/index.js";
 import type { ToolRegistry } from "../tools/registry.js";
+import type { EvidencePayloadStore } from "../recovery/evidence-payload-store.js";
 import {
   computeToolDefinitionFingerprint,
 } from "../tools/fingerprint.js";
 import type { ValidatedToolInput } from "../tools/types.js";
+import {
+  computeToolCallSignature,
+  type LoopGuardDecision,
+  type LoopGuardEntry,
+  type LoopGuardRound,
+} from "../loop-guard/index.js";
+import { sha256CanonicalJson } from "../shared/canonical-json.js";
 
 interface BridgeOptions {
   readonly database: ForgeFlowDatabase;
@@ -37,6 +45,7 @@ interface BridgeOptions {
   readonly stateMachine: ExecutionStateMachine;
   readonly scheduler?: TaskScheduler;
   readonly registry: ToolRegistry;
+  readonly finalReviewPayloadStore?: EvidencePayloadStore;
   readonly snapshot: TaskSnapshot;
   readonly ownership: {
     readonly taskId: string;
@@ -69,6 +78,7 @@ export class PersistentExecutionBridge
     this.unitOfWork = new ExecutionUnitOfWork(
       options.database,
       options.leaseManager,
+      options.finalReviewPayloadStore,
     );
     this.toolRuns = new ToolRunRepository(options.database);
     this.snapshotReader = new TaskSnapshotReader(options.database);
@@ -207,10 +217,117 @@ export class PersistentExecutionBridge
     };
   }
 
+  getLoopGuardHistory(toolCalls: readonly ToolCall[]): {
+    readonly eligible: boolean;
+    readonly rounds: readonly LoopGuardRound[];
+  } {
+    this.options.authority.assertActive();
+    this.refresh();
+    const callIds = new Set(toolCalls.map((call) => call.id));
+    const currentRuns = this.snapshot.toolRuns.filter((run) => callIds.has(run.toolCallId));
+    if (currentRuns.length !== callIds.size || currentRuns.some((run) => run.status !== "queued")) {
+      return { eligible: false, rounds: [] };
+    }
+    const currentStepIds = new Set(currentRuns.map((run) => run.planStepId));
+    const currentPlanIds = new Set(this.snapshot.planSteps
+      .filter((step) => currentStepIds.has(step.id))
+      .map((step) => step.planId));
+    if (currentPlanIds.size !== 1) return { eligible: false, rounds: [] };
+    const currentPlanId = [...currentPlanIds][0] as string;
+    const currentPlan = this.snapshot.executionPlans.find((plan) => plan.id === currentPlanId);
+    if (currentPlan?.status !== "active") return { eligible: false, rounds: [] };
+
+    const rounds = this.snapshot.agentExecutionPlans
+      .filter((plan) => plan.id !== currentPlanId)
+      .sort((left, right) => left.version - right.version)
+      .map((plan): LoopGuardRound => {
+        const stepIds = new Set(this.snapshot.planSteps
+          .filter((step) => step.planId === plan.id)
+          .map((step) => step.id));
+        const entries = this.snapshot.toolRuns
+          .filter((run) => stepIds.has(run.planStepId))
+          .sort((left, right) => left.originalIndex - right.originalIndex)
+          .filter((run) => ["succeeded", "failed", "timed_out", "cancelled", "skipped", "unknown"].includes(run.status))
+          .map((run): LoopGuardEntry => ({
+            ...computeToolCallSignature({ name: run.toolName, arguments: run.input }),
+            mode: run.mode,
+            outcome: run.status as LoopGuardEntry["outcome"],
+            ...(run.output !== null
+              ? { resultDigest: sha256CanonicalJson(run.output) }
+              : run.error === null ? {} : { resultDigest: sha256CanonicalJson(run.error) }),
+          }));
+        return { entries };
+      });
+    return { eligible: true, rounds };
+  }
+
+  pauseForLoopGuard(
+    toolCalls: readonly ToolCall[],
+    decision: LoopGuardDecision,
+  ): void {
+    this.options.authority.assertActive();
+    this.refresh();
+    this.snapshot = this.options.stateMachine.pauseForLoopGuard({
+      ...this.ownershipContext(),
+      expectedTaskVersion: this.snapshot.task.version,
+      toolCallIds: toolCalls.map((call) => call.id),
+      decision,
+    });
+  }
+
+  getTokenBudgetState() {
+    this.options.authority.assertActive();
+    this.options.leaseManager.assertOwned(
+      this.taskId,
+      this.options.ownership.leaseToken,
+      this.options.ownership.fencingToken,
+    );
+    this.refresh();
+    return {
+      maxTokens: this.snapshot.task.maxTokens,
+      usage: this.snapshot.task.tokenUsage,
+    };
+  }
+
+  pauseForTokenBudget(input: {
+    readonly estimatedNextPromptTokens: number;
+    readonly reservedCompletionTokens: number;
+    readonly conservativeUnknownTokens: number;
+    readonly usageUncertain: boolean;
+  }): void {
+    this.options.authority.assertActive();
+    this.refresh();
+    this.snapshot = this.options.stateMachine.pauseForTokenBudget({
+      ...this.ownershipContext(),
+      expectedTaskVersion: this.snapshot.task.version,
+      ...input,
+    });
+  }
+
+  pauseForGlobalModelBudget(input: {
+    readonly estimatedNextPromptTokens: number;
+    readonly reservedCompletionTokens: number;
+    readonly reason: "daily_budget_exhausted" | "provider_concurrency_exhausted";
+  }): void {
+    this.options.authority.assertActive();
+    this.refresh();
+    this.snapshot = this.options.stateMachine.pauseForGlobalModelBudget({
+      ...this.ownershipContext(),
+      expectedTaskVersion: this.snapshot.task.version,
+      ...input,
+    });
+  }
+
   finishRun(result: AgentRunResult): void {
     this.options.authority.assertActive();
+    if (result.status === "limit_reached") {
+      this.finalizeUnstartedToolRuns();
+    }
     const snapshot = this.snapshotReader.load(this.taskId);
     if (result.status === "write_outcome_unknown") {
+      return;
+    }
+    if (result.status === "paused") {
       return;
     }
     if (result.stopReason === "persistence_failed") {
@@ -247,6 +364,7 @@ export class PersistentExecutionBridge
 
   beforeExecute(task: { readonly toolCallId: string }): void {
     this.options.authority.assertActive();
+    this.refresh();
     const run = this.findToolRun(task.toolCallId);
     if (run.status !== "queued") {
       throw new AppError({
@@ -256,9 +374,19 @@ export class PersistentExecutionBridge
         details: [],
       });
     }
-    this.unitOfWork.beginOwnedToolRun({
+    const step = this.snapshot.planSteps.find((item) => item.id === run.planStepId);
+    if (step === undefined) {
+      throw new AppError({
+        code: "TOOL_RUN_ADMISSION_STATE_CONFLICT",
+        message: "The persisted plan step is missing.",
+        statusCode: 409,
+        details: [],
+      });
+    }
+    this.unitOfWork.beginOwnedToolRunAfterWriteBarrier({
       toolRunId: run.id,
       expectedToolRunVersion: run.version,
+      expectedPlanStepVersion: step.version,
       ownership: this.ownershipContext(),
     }, () => this.options.authority.assertActive());
     this.refresh();
@@ -310,8 +438,18 @@ export class PersistentExecutionBridge
     },
   ): void {
     this.options.authority.assertActive();
+    this.refresh();
     const run = this.findToolRun(task.toolCallId);
+    if (run.status === "awaiting_approval" &&
+        this.snapshot.approvals.some((approval) => approval.toolRunId === run.id && approval.status === "pending") &&
+        ["cancelled", "skipped"].includes(result.status)) {
+      return;
+    }
     if (run.status === "unknown" && result.status === "unknown") {
+      return;
+    }
+    if ((run.status === "skipped" && result.status === "skipped") ||
+        (run.status === "cancelled" && result.status === "cancelled")) {
       return;
     }
     if (
@@ -399,6 +537,27 @@ export class PersistentExecutionBridge
       });
     }
     return run;
+  }
+
+  private finalizeUnstartedToolRuns(): void {
+    const unstarted = this.toolRuns
+      .listByTask(this.taskId)
+      .filter((run) => ["queued", "awaiting_approval"].includes(run.status));
+    for (const run of unstarted) {
+      this.unitOfWork.finalizeOwnedToolRunBeforeStart({
+        toolRunId: run.id,
+        expectedToolRunVersion: run.version,
+        status: "skipped",
+        error: {
+          code: "TOOL_CALL_LIMIT_REACHED",
+          message:
+            "The tool call was not started because the task reached its configured limit.",
+          details: [],
+        },
+        ownership: this.ownershipContext(),
+      }, () => this.options.authority.assertActive());
+      this.refresh();
+    }
   }
 
   private refresh(): void {

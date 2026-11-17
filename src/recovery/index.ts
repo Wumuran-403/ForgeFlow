@@ -2,6 +2,71 @@ export {
   RecoveryManager,
   type RecoveryManagerOptions,
 } from "./recovery-manager.js";
+export type {
+  SubmitRecoveryEvidenceInput,
+  MarkRecoveryReviewUnresolvedInput,
+} from "./recovery-review-submission.js";
+export {
+  MarkRecoveryReviewUnresolvedInputSchema,
+  RecoveryEvidenceAvailabilityAuditSchema,
+  RecoveryEvidenceAvailabilityStatusSchema,
+  SubmitRecoveryEvidenceInputSchema,
+  buildRecoveryEvidenceEnvelope,
+  computeUnresolvedOperationPayloadDigest,
+  evidenceOperationActorId,
+  submittedEvidencePayloadBytes,
+  type RecoveryEvidenceAvailabilityAudit,
+} from "./recovery-review-submission.js";
+export {
+  FileEvidencePayloadStore,
+  type EvidencePayloadStore,
+  type EvidencePayloadStoreResult,
+} from "./evidence-payload-store.js";
+export {
+  RecoveryEvidencePayloadIntegrityReasonCodeSchema,
+  RecoveryEvidencePayloadIntegrityResultSchema,
+  verifyRecoveryEvidencePayloadIntegrity,
+  type RecoveryEvidencePayloadIntegrityManifest,
+  type RecoveryEvidencePayloadIntegrityReasonCode,
+  type RecoveryEvidencePayloadIntegrityResult,
+  type VerifiedEvidencePayload,
+} from "./recovery-evidence-payload-integrity.js";
+export {
+  RecoveryManualAttestedSourceContractV1Schema,
+  RecoverySourceContractExpectedBindingsSchema,
+  RecoverySourceContractV1Schema,
+  RecoverySystemVerifiedSourceContractV1Schema,
+  canonicalRecoverySourceContractV1,
+  computeRecoverySourceContractDigest,
+  validateRecoverySourceContractV1,
+  type RecoveryManualAttestedSourceContractV1,
+  type RecoverySourceContractExpectedBindings,
+  type RecoverySourceContractV1,
+  type RecoverySystemVerifiedSourceContractV1,
+} from "./recovery-source-contract.js";
+export {
+  RecoveryPersistedVerifierBindingSchema,
+  RecoveryVerifierEffectiveConfigSchema,
+  RecoveryVerifierHostBindingDefinitionSchema,
+  RecoveryVerifierHostBindingProvider,
+  RecoveryVerifierHostBindingSchema,
+  RecoveryVerifierRuntime,
+  RecoveryVerifierRuntimeExecutionResultSchema,
+  type ExecutePersistedRecoveryVerifierInput,
+  type RecoveryPersistedVerifierBinding,
+  type RecoveryVerifierEffectiveConfig,
+  type RecoveryVerifierHostBinding,
+  type RecoveryVerifierHostBindingDefinition,
+  type RecoveryVerifierRuntimeExecutionResult,
+} from "./recovery-verifier-runtime.js";
+export {
+  RecoveryEvidenceStoredVerificationResultSchema,
+  RecoveryEvidenceVerificationService,
+  VerifyStoredEvidenceInputSchema,
+  type RecoveryEvidenceStoredVerificationResult,
+  type RecoveryEvidenceVerificationServiceOptions,
+  type VerifyStoredEvidenceInput,
+} from "./recovery-evidence-verification-service.js";
 export { RecoveryScanner, type RecoveryScannerOptions } from "./recovery-scanner.js";
 export {
   RecoveryClassifier,
@@ -31,3 +96,90 @@ export {
   type RecoveryEvidenceEnvelope,
   type RecoveryReadbackResult,
 } from "./recovery-evidence.js";
+export {
+  computeRecoveryReviewOperationPayloadDigest,
+  computeRecoveryReviewOperationRequestKey,
+  type RecoveryReviewOperationKeyInput,
+} from "../storage/recovery-review-operation-keys.js";
+export {
+  RecoveryVerifierAllowedPayloadTypesSchema,
+  RecoveryVerifierAllowedSourceTypesSchema,
+  RecoveryVerifierCompatibilityInputSchema,
+  RecoveryVerifierContextSchema,
+  RecoveryVerifierDefinitionSchema,
+  RecoveryVerifierDefinitionMetadataSchema,
+  RecoveryVerifierIdSchema,
+  RecoveryVerifierInputSchema,
+  RecoveryVerifierPayloadSchema,
+  RecoveryVerifierRegistry,
+  RecoveryVerifierResultSchema,
+  type RecoveryVerifierCompatibilityInput,
+  type RecoveryVerifierContext,
+  type RecoveryVerifierDefinition,
+  type RecoveryVerifierInput,
+  type RecoveryVerifierPayload,
+  type RecoveryVerifierResult,
+  type RegisteredRecoveryVerifier,
+} from "./recovery-verifier-registry.js";
+export {
+  RecoveryReadbackAllowlistContractMetadataSchema,
+  RecoveryReadbackAllowlistIdSchema,
+  RecoveryReadbackAllowedResourceSchemesSchema,
+  RecoveryReadbackConsistencyModeSchema,
+  RecoveryReadbackOriginalWriteContextSchema,
+  RecoveryReadbackPreparedInvocationSchema,
+  RecoveryReadbackProtocolVersionSchema,
+  RecoveryReadbackRequestContextSchema,
+  RecoveryReadbackResolvedSourceSchema,
+  RecoveryReadbackResultMetadataSchema,
+  RecoveryReadbackRetrySafetySchema,
+  RecoveryReadbackSensitiveOutputPolicySchema,
+  RecoveryReadbackToolDefinitionSchema,
+  RecoveryReadbackToolRegistry,
+  RecoveryReadbackValidatedResultSchema,
+  computeRecoveryReadbackAllowlistVersion,
+  type RecoveryReadbackAllowlistContractMetadata,
+  type RecoveryReadbackConsistencyMode,
+  type RecoveryReadbackOriginalWriteContext,
+  type RecoveryReadbackPreparedInvocation,
+  type RecoveryReadbackRequestContext,
+  type RecoveryReadbackResolvedSource,
+  type RecoveryReadbackResultMetadata,
+  type RecoveryReadbackRetrySafety,
+  type RecoveryReadbackSensitiveOutputPolicy,
+  type RecoveryReadbackToolDefinition,
+  type RecoveryReadbackValidatedResult,
+  type RegisteredRecoveryReadbackTool,
+} from "./recovery-readback-tool-registry.js";
+export {
+  PrepareRecoveryEvidenceReadbackInputSchema,
+  PrepareRecoveryEvidenceReadbackResultSchema,
+  RecoveryEvidenceReadbackService,
+  type PrepareRecoveryEvidenceReadbackInput,
+  type PrepareRecoveryEvidenceReadbackResult,
+  type RecoveryEvidenceReadbackServiceOptions,
+} from "./recovery-evidence-readback-service.js";
+export {
+  prepareRecoveryEvidenceDispatchPreflight,
+  type RecoveryEvidenceDispatchPreflightCapability,
+} from "./recovery-evidence-dispatch-preflight.js";
+export {
+  RecoveryReadbackAlreadyRegisteredError,
+  RecoveryReadbackArgumentsInvalidError,
+  RecoveryReadbackDefinitionInvalidError,
+  RecoveryReadbackNotFoundError,
+  RecoveryReadbackResultContractInvalidError,
+  RecoveryReadbackSourceInvalidError,
+  RecoveryReadbackToolForbiddenError,
+  RecoveryReadbackToolMismatchError,
+  RecoveryReadbackVersionMismatchError,
+  RecoveryReadbackVersionRequiredError,
+  RecoveryVerifierAlreadyRegisteredError,
+  RecoveryVerifierBindingDefinitionInvalidError,
+  RecoveryVerifierBindingNotFoundError,
+  RecoveryVerifierCompatibilityError,
+  RecoveryVerifierDefinitionInvalidError,
+  RecoveryVerifierNotFoundError,
+  RecoveryVerifierResultInvalidError,
+  RecoveryVerifiedEvidencePayloadInvalidError,
+} from "./recovery-contract-errors.js";

@@ -208,14 +208,68 @@ describe("TaskLeaseManager", () => {
       `,
     );
 
-    expect(() => manager.claim("task-rollback", "worker-a")).toThrow(
-      "lease event rejected",
-    );
+    expect(() =>
+      manager.claimWithClaimEvent("task-rollback", "worker-a"),
+    ).toThrow("lease event rejected");
     expect(
       activeDatabase
         .prepare("SELECT * FROM task_leases WHERE task_id = ?")
         .get("task-rollback"),
     ).toBeUndefined();
+    expect(
+      activeDatabase
+        .prepare(
+          `
+            SELECT COUNT(*) AS count FROM events
+            WHERE task_id = ? AND type = 'lease.claimed'
+          `,
+        )
+        .get("task-rollback"),
+    ).toEqual({ count: 0 });
+
+    activeDatabase.exec("DROP TRIGGER reject_lease_event");
+    createTask(activeDatabase, "task-checkpoint-rollback");
+    activeDatabase.exec(
+      `
+        CREATE TRIGGER reject_lease_checkpoint
+        BEFORE INSERT ON checkpoints
+        WHEN NEW.reason = 'lease_claimed'
+        BEGIN
+          SELECT RAISE(ABORT, 'lease checkpoint rejected');
+        END
+      `,
+    );
+    expect(() =>
+      manager.claimWithClaimEvent(
+        "task-checkpoint-rollback",
+        "worker-a",
+      ),
+    ).toThrow("lease checkpoint rejected");
+    expect(
+      activeDatabase
+        .prepare("SELECT * FROM task_leases WHERE task_id = ?")
+        .get("task-checkpoint-rollback"),
+    ).toBeUndefined();
+    expect(
+      activeDatabase
+        .prepare(
+          `
+            SELECT COUNT(*) AS count FROM events
+            WHERE task_id = ? AND type = 'lease.claimed'
+          `,
+        )
+        .get("task-checkpoint-rollback"),
+    ).toEqual({ count: 0 });
+    expect(
+      activeDatabase
+        .prepare(
+          `
+            SELECT COUNT(*) AS count FROM checkpoints
+            WHERE task_id = ? AND reason = 'lease_claimed'
+          `,
+        )
+        .get("task-checkpoint-rollback"),
+    ).toEqual({ count: 0 });
   });
 
   it("keeps heartbeat and release atomic with their Events", () => {

@@ -8,6 +8,11 @@ import { MessageRepository } from "./message-repository.js";
 import { ModelCallRepository } from "./model-call-repository.js";
 import { PlanStepRepository } from "./plan-step-repository.js";
 import { RecoveryEvidenceReadRepository } from "./recovery-evidence-read-repository.js";
+import { RecoveryEvidenceReadAttemptRepository } from "./recovery-evidence-read-attempt-repository.js";
+import { RecoveryEvidenceReadbackRequestRepository } from "./recovery-evidence-readback-request-repository.js";
+import { RecoveryEvidenceSubmissionRepository } from "./recovery-evidence-submission-repository.js";
+import { RecoveryEvidenceVerificationCheckRepository } from "./recovery-evidence-verification-check-repository.js";
+import { RecoveryEvidenceVerificationRepository } from "./recovery-evidence-verification-repository.js";
 import { RecoveryLegacyAttestationRepository } from "./recovery-legacy-attestation-repository.js";
 import { RecoveryReviewRepository } from "./recovery-review-repository.js";
 import { RecoveryReviewOperationRepository } from "./recovery-review-operation-repository.js";
@@ -30,7 +35,12 @@ export class TaskSnapshotReader {
   private readonly toolRuns: ToolRunRepository;
   private readonly approvals: ApprovalRepository;
   private readonly recoveryReviews: RecoveryReviewRepository;
+  private readonly recoveryEvidenceReadbackRequests: RecoveryEvidenceReadbackRequestRepository;
+  private readonly recoveryEvidenceReadAttempts: RecoveryEvidenceReadAttemptRepository;
   private readonly recoveryEvidenceReads: RecoveryEvidenceReadRepository;
+  private readonly recoveryEvidenceVerificationChecks: RecoveryEvidenceVerificationCheckRepository;
+  private readonly recoveryEvidenceVerifications: RecoveryEvidenceVerificationRepository;
+  private readonly recoveryEvidenceSubmissions: RecoveryEvidenceSubmissionRepository;
   private readonly recoveryLegacyAttestations: RecoveryLegacyAttestationRepository;
   private readonly recoveryReviewOperations: RecoveryReviewOperationRepository;
 
@@ -47,7 +57,17 @@ export class TaskSnapshotReader {
     this.toolRuns = new ToolRunRepository(database);
     this.approvals = new ApprovalRepository(database);
     this.recoveryReviews = new RecoveryReviewRepository(database);
+    this.recoveryEvidenceReadbackRequests =
+      new RecoveryEvidenceReadbackRequestRepository(database);
+    this.recoveryEvidenceReadAttempts =
+      new RecoveryEvidenceReadAttemptRepository(database);
     this.recoveryEvidenceReads = new RecoveryEvidenceReadRepository(database);
+    this.recoveryEvidenceVerificationChecks =
+      new RecoveryEvidenceVerificationCheckRepository(database);
+    this.recoveryEvidenceVerifications =
+      new RecoveryEvidenceVerificationRepository(database);
+    this.recoveryEvidenceSubmissions =
+      new RecoveryEvidenceSubmissionRepository(database);
     this.recoveryLegacyAttestations =
       new RecoveryLegacyAttestationRepository(database);
     this.recoveryReviewOperations =
@@ -75,8 +95,18 @@ export class TaskSnapshotReader {
         toolRuns: this.toolRuns.listByTask(taskId),
         approvals: this.approvals.listByTask(taskId),
         recoveryReviews: this.recoveryReviews.listByTask(taskId),
+        recoveryEvidenceReadbackRequests:
+          this.recoveryEvidenceReadbackRequests.listByTask(taskId),
+        recoveryEvidenceReadAttempts:
+          this.recoveryEvidenceReadAttempts.listByTask(taskId),
         recoveryEvidenceReads:
           this.recoveryEvidenceReads.listByTask(taskId),
+        recoveryEvidenceVerificationChecks:
+          this.recoveryEvidenceVerificationChecks.listByTask(taskId),
+        recoveryEvidenceVerifications:
+          this.recoveryEvidenceVerifications.listByTask(taskId),
+        recoveryEvidenceSubmissions:
+          this.recoveryEvidenceSubmissions.listByTask(taskId),
         recoveryLegacyAttestations:
           this.recoveryLegacyAttestations.listByTask(taskId),
         recoveryReviewOperations:

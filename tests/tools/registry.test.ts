@@ -10,6 +10,7 @@ import {
   ToolRegistryLockedError,
   ToolValidatedInputInvalidError,
 } from "../../src/tools/errors.js";
+import { computeToolInputSchemaHash } from "../../src/tools/fingerprint.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import {
   DEFAULT_TOOL_TIMEOUT_MS,
@@ -181,6 +182,47 @@ describe("ToolRegistry", () => {
         version: " ",
       }),
     ).toThrow(ToolDefinitionInvalidError);
+  });
+
+  it("projects a stable schema hash alongside tool name and version", async () => {
+    const registry = new ToolRegistry();
+    const changedShape = z.object({
+      query: z.string().trim().min(2),
+      limit: z.number().int().nonnegative(),
+    });
+    registry.register(createSearchTool(async () => []));
+    registry.register({
+      ...createSearchTool(async () => []),
+      name: "inventory_same_schema",
+      version: "2",
+      inputSchema: searchInputSchema,
+    });
+    registry.register({
+      ...createSearchTool(async () => []),
+      name: "inventory_changed_schema",
+      inputSchema: changedShape,
+    });
+
+    const search = registry.get("inventory_search");
+    const same = registry.get("inventory_same_schema");
+    const changed = registry.get("inventory_changed_schema");
+
+    expect(search.inputSchemaHash).toBe(
+      computeToolInputSchemaHash(searchInputSchema),
+    );
+    expect(same.inputSchemaHash).toBe(search.inputSchemaHash);
+    expect(same.version).not.toBe(search.version);
+    expect(changed.inputSchemaHash).not.toBe(search.inputSchemaHash);
+
+    const prepared = await registry.validateInput("inventory_search", {
+      query: "STM32",
+      limit: 1,
+    });
+    expect(prepared).toMatchObject({
+      toolName: "inventory_search",
+      toolVersion: "1",
+      inputSchemaHash: search.inputSchemaHash,
+    });
   });
 
   it("rejects invalid timeout values", () => {

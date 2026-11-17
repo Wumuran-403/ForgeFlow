@@ -208,6 +208,45 @@ export class RecoveryReviewRepository {
     return this.get(id);
   }
 
+  finalizeCas(input: {
+    readonly id: string;
+    readonly taskId: string;
+    readonly expectedDecisionVersion: number;
+    readonly status: "confirmed_succeeded" | "confirmed_not_executed";
+    readonly note: string | null;
+    readonly sourceType: RecoveryReviewSource;
+    readonly evidenceRef: string;
+    readonly evidencePayloadDigest: string;
+    readonly evidencePayloadType: RecoveryEvidencePayloadType;
+    readonly evidenceDigestProtocol: RecoveryEvidenceDigestProtocol;
+    readonly evidenceEnvelopeDigest: string;
+    readonly actorId: string | null;
+    readonly verifierId: string | null;
+    readonly verificationId: string | null;
+    readonly sourceObservedAt: string;
+    readonly submittedAt: string;
+    readonly verifiedAt: string | null;
+    readonly decidedAt: string;
+  }, permit: StorageWritePermit): RecoveryReviewRecord {
+    assertStorageWritePermit(this.database, permit);
+    const result = this.database.prepare(`
+      UPDATE recovery_reviews SET status = ?, note = ?, source_type = ?, evidence_ref = ?,
+        decision_version = decision_version + 1, evidence_payload_digest = ?,
+        evidence_payload_type = ?, evidence_digest_protocol = ?, evidence_envelope_digest = ?,
+        actor_id = ?, verifier_id = ?, verification_id = ?, source_observed_at = ?,
+        submitted_at = ?, verified_at = ?, decided_at = ?, updated_at = ?
+      WHERE id = ? AND task_id = ? AND review_protocol_version >= 1
+        AND status IN ('pending', 'unresolved') AND decision_version = ?
+    `).run(input.status, input.note, input.sourceType, input.evidenceRef,
+      input.evidencePayloadDigest, input.evidencePayloadType, input.evidenceDigestProtocol,
+      input.evidenceEnvelopeDigest, input.actorId, input.verifierId, input.verificationId,
+      input.sourceObservedAt, input.submittedAt, input.verifiedAt, input.decidedAt,
+      input.decidedAt, input.id, input.taskId, input.expectedDecisionVersion);
+    if (result.changes !== 1) throw new AppError({ code: "RECOVERY_REVIEW_DECISION_VERSION_CONFLICT",
+      message: "Recovery review decision version has changed.", statusCode: 409, details: [] });
+    return this.get(input.id);
+  }
+
   get(id: string): RecoveryReviewRecord {
     const row = this.database
       .prepare("SELECT * FROM recovery_reviews WHERE id = ?")

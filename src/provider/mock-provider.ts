@@ -1,4 +1,5 @@
 import { AppError } from "../shared/errors.js";
+import { estimateJsonTokens } from "../context/token-usage.js";
 import {
   ModelResponseSchema,
   type GenerateOptions,
@@ -28,10 +29,6 @@ export type MockProviderStep =
   | MockProviderResponse
   | MockProviderErrorResponse;
 
-function estimateTokens(value: string): number {
-  return Math.max(1, Math.ceil(value.length / 4));
-}
-
 function isErrorStep(step: MockProviderStep): step is MockProviderErrorResponse {
   return typeof step === "object" && "error" in step;
 }
@@ -59,6 +56,17 @@ export class MockLLMProvider implements LLMProvider {
 
   get consumedResponseCount(): number {
     return this.nextStepIndex;
+  }
+
+  skipResponses(count: number): void {
+    if (!Number.isInteger(count) || count < 0 || count > this.steps.length) {
+      throw new AppError({
+        code: "MOCK_SCRIPT_POSITION_INVALID",
+        message: "The requested mock script position is invalid.",
+        statusCode: 500,
+      });
+    }
+    this.nextStepIndex = count;
   }
 
   async generate(
@@ -108,11 +116,12 @@ export class MockLLMProvider implements LLMProvider {
 
     const content = typeof step === "string" ? step : step.content;
     const toolCalls = typeof step === "string" ? undefined : step.toolCalls;
-    const serializedPrompt = JSON.stringify(request.messages);
-    const promptTokens = estimateTokens(serializedPrompt);
-    const completionTokens = estimateTokens(
-      `${content}${toolCalls === undefined ? "" : JSON.stringify(toolCalls)}`,
-    );
+    const promptTokens = estimateJsonTokens(request);
+    const completionTokens = estimateJsonTokens({
+      role: "assistant",
+      content,
+      ...(toolCalls === undefined ? {} : { toolCalls }),
+    });
     const estimatedUsage: ModelUsage = {
       promptTokens,
       completionTokens,

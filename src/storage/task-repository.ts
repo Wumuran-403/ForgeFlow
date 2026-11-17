@@ -2,8 +2,8 @@ import type Database from "better-sqlite3";
 import type { z } from "zod";
 
 import {
-  ModelUsageSchema,
-  type ModelUsage,
+  TokenUsageAggregateSchema,
+  type TokenUsageAggregate,
 } from "../provider/types.js";
 import { AppError } from "../shared/errors.js";
 import { decodeJson, encodeJson } from "./json-codec.js";
@@ -29,6 +29,7 @@ interface TaskRow {
   current_iteration: number;
   max_model_turns: number;
   max_tool_calls: number;
+  max_tokens: number | null;
   token_usage_json: string;
   version: number;
   cancel_requested_at: string | null;
@@ -53,8 +54,9 @@ function mapTaskRow(row: TaskRow): TaskRecord {
     currentIteration: row.current_iteration,
     maxModelTurns: row.max_model_turns,
     maxToolCalls: row.max_tool_calls,
+    maxTokens: row.max_tokens,
     tokenUsage: decodeJson(
-      ModelUsageSchema,
+      TokenUsageAggregateSchema,
       row.token_usage_json,
       "tasks.token_usage_json",
     ),
@@ -92,9 +94,9 @@ export class TaskRepository {
           INSERT INTO tasks (
             id, trace_id, status, objective, system_prompt,
             current_iteration, max_model_turns, max_tool_calls,
-            token_usage_json, version, last_event_sequence,
+            max_tokens, token_usage_json, version, last_event_sequence,
             created_at, updated_at
-          ) VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, 1, 0, ?, ?)
+          ) VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, 1, 0, ?, ?)
         `,
       )
       .run(
@@ -104,8 +106,9 @@ export class TaskRepository {
         input.systemPrompt,
         input.maxModelTurns,
         input.maxToolCalls,
+        input.maxTokens ?? null,
         encodeJson(
-          ModelUsageSchema,
+          TokenUsageAggregateSchema,
           input.tokenUsage,
           "tasks.token_usage_json",
         ),
@@ -191,6 +194,7 @@ export class TaskRepository {
       readonly completedAt?: string;
       readonly cancelRequestedAt?: string;
       readonly pauseRequestedAt?: string;
+      readonly clearPauseRequestedAt?: boolean;
     } = {},
   ): TaskRecord {
     assertStorageWritePermit(this.database, permit);
@@ -211,7 +215,7 @@ export class TaskRepository {
               final_answer = COALESCE(?, final_answer),
               completed_at = COALESCE(?, completed_at),
               cancel_requested_at = COALESCE(?, cancel_requested_at),
-              pause_requested_at = COALESCE(?, pause_requested_at)
+              pause_requested_at = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, pause_requested_at) END
           WHERE id = ? AND status = ? AND version = ?
         `,
       )
@@ -221,6 +225,7 @@ export class TaskRepository {
         options.finalAnswer ?? null,
         options.completedAt ?? null,
         options.cancelRequestedAt ?? null,
+        options.clearPauseRequestedAt === true ? 1 : 0,
         options.pauseRequestedAt ?? null,
         taskId,
         TaskStatusSchema.parse(expectedStatus),
@@ -230,6 +235,101 @@ export class TaskRepository {
       throw new AppError({
         code: "TASK_STATE_CONFLICT",
         message: "Task changed while applying a transition.",
+        statusCode: 409,
+        details: [],
+      });
+    }
+    return this.get(taskId);
+  }
+
+  setRecoveryEvidenceCancelIntentCas(
+    taskId: string,
+    expectedVersion: number,
+    cancelRequestedAt: string,
+    updatedAt: string,
+    permit: StorageWritePermit,
+  ): TaskRecord {
+    assertStorageWritePermit(this.database, permit);
+    const result = this.database
+      .prepare(
+        `
+          UPDATE tasks
+          SET cancel_requested_at = ?, updated_at = ?
+          WHERE id = ?
+            AND status = 'waiting_review'
+            AND version = ?
+            AND cancel_requested_at IS NULL
+        `,
+      )
+      .run(cancelRequestedAt, updatedAt, taskId, expectedVersion);
+    if (result.changes !== 1) {
+      throw new AppError({
+        code: "TASK_STATE_CONFLICT",
+        message: "Task changed while setting recovery evidence Cancel intent.",
+        statusCode: 409,
+        details: [],
+      });
+    }
+    return this.get(taskId);
+  }
+
+  setRecoveryEvidencePauseIntentCas(
+    taskId: string,
+    expectedVersion: number,
+    pauseRequestedAt: string,
+    updatedAt: string,
+    permit: StorageWritePermit,
+  ): TaskRecord {
+    assertStorageWritePermit(this.database, permit);
+    const result = this.database
+      .prepare(
+        `
+          UPDATE tasks
+          SET pause_requested_at = ?, updated_at = ?
+          WHERE id = ?
+            AND status = 'waiting_review'
+            AND version = ?
+            AND cancel_requested_at IS NULL
+            AND pause_requested_at IS NULL
+        `,
+      )
+      .run(pauseRequestedAt, updatedAt, taskId, expectedVersion);
+    if (result.changes !== 1) {
+      throw new AppError({
+        code: "TASK_STATE_CONFLICT",
+        message: "Task changed while setting recovery evidence Pause intent.",
+        statusCode: 409,
+        details: [],
+      });
+    }
+    return this.get(taskId);
+  }
+
+  clearRecoveryEvidencePauseIntentCas(
+    taskId: string,
+    expectedVersion: number,
+    expectedPauseRequestedAt: string,
+    updatedAt: string,
+    permit: StorageWritePermit,
+  ): TaskRecord {
+    assertStorageWritePermit(this.database, permit);
+    const result = this.database
+      .prepare(
+        `
+          UPDATE tasks
+          SET pause_requested_at = NULL, updated_at = ?
+          WHERE id = ?
+            AND status = 'waiting_review'
+            AND version = ?
+            AND cancel_requested_at IS NULL
+            AND pause_requested_at = ?
+        `,
+      )
+      .run(updatedAt, taskId, expectedVersion, expectedPauseRequestedAt);
+    if (result.changes !== 1) {
+      throw new AppError({
+        code: "TASK_STATE_CONFLICT",
+        message: "Task changed while clearing recovery evidence Pause intent.",
         statusCode: 409,
         details: [],
       });
@@ -271,7 +371,7 @@ export class TaskRepository {
 
   updateTokenUsage(
     taskId: string,
-    usage: ModelUsage,
+    usage: TokenUsageAggregate,
     updatedAt: string,
     permit: StorageWritePermit,
   ): void {
@@ -287,7 +387,7 @@ export class TaskRepository {
         `,
       )
       .run(
-        encodeJson(ModelUsageSchema, usage, "tasks.token_usage_json"),
+        encodeJson(TokenUsageAggregateSchema, usage, "tasks.token_usage_json"),
         updatedAt,
         taskId,
       );

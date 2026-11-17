@@ -4,12 +4,14 @@ import { z } from "zod";
 import {
   closeDatabase,
   ExecutionUnitOfWork,
+  ExecutionStateMachine,
   migrateStorage,
   openDatabase,
   PlanStepRepository,
   runInTransaction,
   TaskLeaseManager,
   TaskSnapshotReader,
+  TaskRepository,
   type ForgeFlowDatabase,
 } from "../../src/storage/index.js";
 import { createStorageWritePermit } from "../../src/storage/write-boundary.js";
@@ -59,6 +61,98 @@ afterEach(() => {
 });
 
 describe("persistent AgentRunner and TaskScheduler integration", () => {
+  it("rejects a skipped step and a waiting_review task before tool intent", () => {
+    const activeDatabase = database as ForgeFlowDatabase;
+    const fixture = seedPersistentPlan(activeDatabase, "admission-state", "write");
+    const leases = new TaskLeaseManager(activeDatabase);
+    const lease = leases.claim(fixture.taskId, "admission-worker");
+    const ownership = { taskId: fixture.taskId, leaseToken: lease.leaseToken as string,
+      fencingToken: lease.fencingToken };
+    const machine = new ExecutionStateMachine(activeDatabase, leases);
+    const before = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+    if (before.task.status === "queued") machine.transitionTask({ ...ownership,
+      expectedTaskVersion: before.task.version, expectedStatus: "queued", status: "running" });
+    const unit = new ExecutionUnitOfWork(activeDatabase, leases);
+    const start = () => {
+      const snapshot = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+      return unit.beginOwnedToolRunAfterWriteBarrier({ toolRunId: fixture.toolRunId,
+        expectedToolRunVersion: snapshot.toolRuns[0]!.version,
+        expectedPlanStepVersion: snapshot.planSteps[0]!.version, ownership });
+    };
+    runInTransaction(activeDatabase, () => {
+      new PlanStepRepository(activeDatabase).updateStatus(fixture.planStepId, "skipped",
+        new Date().toISOString(), createStorageWritePermit(activeDatabase));
+    }, "immediate");
+    expect(start).toThrow();
+    let snapshot = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+    expect(snapshot.toolRuns[0]?.status).toBe("queued");
+    runInTransaction(activeDatabase, () => {
+      const permit = createStorageWritePermit(activeDatabase);
+      new PlanStepRepository(activeDatabase).updateStatus(fixture.planStepId, "queued",
+        new Date().toISOString(), permit);
+      new TaskRepository(activeDatabase).updateStatus(fixture.taskId, "waiting_review",
+        new Date().toISOString(), permit);
+    }, "immediate");
+    expect(start).toThrow();
+    snapshot = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+    expect(snapshot.toolRuns[0]?.status).toBe("queued");
+    expect(snapshot.events.filter((event) => event.type === "tool.intent_committed")).toHaveLength(0);
+  });
+
+  it("rolls back Write admission when intent audit fails and rejects stale fencing", () => {
+    const activeDatabase = database as ForgeFlowDatabase;
+    const fixture = seedPersistentPlan(activeDatabase, "admission-rollback", "write");
+    const leases = new TaskLeaseManager(activeDatabase);
+    const lease = leases.claim(fixture.taskId, "first-worker");
+    const ownership = { taskId: fixture.taskId, leaseToken: lease.leaseToken as string,
+      fencingToken: lease.fencingToken };
+    const machine = new ExecutionStateMachine(activeDatabase, leases);
+    const before = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+    if (before.task.status === "queued") machine.transitionTask({ ...ownership,
+      expectedTaskVersion: before.task.version, expectedStatus: "queued", status: "running" });
+    const unit = new ExecutionUnitOfWork(activeDatabase, leases);
+    const start = (owner = ownership) => {
+      const snapshot = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+      return unit.beginOwnedToolRunAfterWriteBarrier({ toolRunId: fixture.toolRunId,
+        expectedToolRunVersion: snapshot.toolRuns[0]!.version,
+        expectedPlanStepVersion: snapshot.planSteps[0]!.version, ownership: owner });
+    };
+    activeDatabase.exec(`CREATE TRIGGER deny_write_intent BEFORE INSERT ON events
+      WHEN NEW.type = 'tool.intent_committed' BEGIN SELECT RAISE(ABORT, 'denied'); END`);
+    expect(start).toThrow();
+    activeDatabase.exec("DROP TRIGGER deny_write_intent");
+    expect(new TaskSnapshotReader(activeDatabase).load(fixture.taskId).toolRuns[0]?.status).toBe("queued");
+    leases.release(fixture.taskId, ownership.leaseToken, ownership.fencingToken);
+    leases.claim(fixture.taskId, "second-worker");
+    expect(() => start()).toThrow();
+    expect(new TaskSnapshotReader(activeDatabase).load(fixture.taskId).toolRuns[0]?.status).toBe("queued");
+  });
+
+  it("serializes Barrier and ToolRun begin across two SQLite connections", () => {
+    const activeDatabase = database as ForgeFlowDatabase;
+    const fixture = seedPersistentPlan(activeDatabase, "admission-two-connections", "write");
+    const leases = new TaskLeaseManager(activeDatabase);
+    const lease = leases.claim(fixture.taskId, "write-owner");
+    const ownership = { taskId: fixture.taskId, leaseToken: lease.leaseToken as string,
+      fencingToken: lease.fencingToken };
+    const before = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+    if (before.task.status === "queued") new ExecutionStateMachine(activeDatabase, leases)
+      .transitionTask({ ...ownership, expectedTaskVersion: before.task.version,
+        expectedStatus: "queued", status: "running" });
+    const initial = new TaskSnapshotReader(activeDatabase).load(fixture.taskId);
+    const input = { toolRunId: fixture.toolRunId,
+      expectedToolRunVersion: initial.toolRuns[0]!.version,
+      expectedPlanStepVersion: initial.planSteps[0]!.version, ownership };
+    const second = openDatabase((temporaryDatabase as TemporaryDatabase).path);
+    try {
+      new ExecutionUnitOfWork(activeDatabase, leases).beginOwnedToolRunAfterWriteBarrier(input);
+      expect(() => new ExecutionUnitOfWork(second, new TaskLeaseManager(second))
+        .beginOwnedToolRunAfterWriteBarrier(input)).toThrow();
+      const after = new TaskSnapshotReader(second).load(fixture.taskId);
+      expect(after.toolRuns[0]?.status).toBe("running");
+      expect(after.events.filter((event) => event.type === "tool.intent_committed")).toHaveLength(1);
+    } finally { closeDatabase(second); }
+  });
   it("persists requested Model Calls before Provider and runs Read batches in parallel", async () => {
     const activeDatabase = database as ForgeFlowDatabase;
     createTask(activeDatabase, "task-read");

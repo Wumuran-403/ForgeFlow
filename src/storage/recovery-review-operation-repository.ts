@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { AppError } from "../shared/errors.js";
 import {
+  RecoveryReviewOperationStatusSchema,
   RecoveryReviewOperationTypeSchema,
   type RecoveryReviewOperationRecord,
 } from "./types.js";
@@ -22,7 +23,9 @@ const CreateRecoveryReviewOperationInputSchema = z
     operation: RecoveryReviewOperationTypeSchema,
     expectedDecisionVersion: z.number().int().nonnegative(),
     resultingDecisionVersion: z.number().int().positive(),
-    status: z.string().trim().min(1),
+    status: RecoveryReviewOperationStatusSchema,
+    actorId: z.string().trim().min(1),
+    operationPayloadDigest: Sha256DigestSchema,
     evidenceEnvelopeDigest: Sha256DigestSchema.nullable(),
     resultPlanId: z.string().min(1).nullable(),
     resultToolRunId: z.string().min(1).nullable(),
@@ -31,6 +34,15 @@ const CreateRecoveryReviewOperationInputSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    const requiredStatus =
+      value.operation === "request_readback" ? "accepted" : "applied";
+    if (value.status !== requiredStatus) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: `Operation ${value.operation} requires status ${requiredStatus}.`,
+      });
+    }
     if (value.resultingDecisionVersion !== value.expectedDecisionVersion + 1) {
       context.addIssue({
         code: "custom",
@@ -55,6 +67,26 @@ const CreateRecoveryReviewOperationInputSchema = z
         message: "Only read-back requests may reference result plan rows.",
       });
     }
+    if (
+      value.operation === "advance_decision_version" &&
+      value.evidenceEnvelopeDigest !== null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["evidenceEnvelopeDigest"],
+        message: "Decision-version revisions cannot contain evidence.",
+      });
+    }
+    if (
+      value.operation === "submit_evidence" &&
+      value.evidenceEnvelopeDigest === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["evidenceEnvelopeDigest"],
+        message: "Evidence submissions require an envelope digest.",
+      });
+    }
   });
 
 export type CreateRecoveryReviewOperationInput = z.input<
@@ -70,6 +102,8 @@ interface RecoveryReviewOperationRow {
   expected_decision_version: number;
   resulting_decision_version: number;
   status: string;
+  actor_id: string | null;
+  operation_payload_digest: string | null;
   evidence_envelope_digest: string | null;
   result_plan_id: string | null;
   result_tool_run_id: string | null;
@@ -88,7 +122,9 @@ function mapRecoveryReviewOperationRow(
     operation: RecoveryReviewOperationTypeSchema.parse(row.operation),
     expectedDecisionVersion: row.expected_decision_version,
     resultingDecisionVersion: row.resulting_decision_version,
-    status: row.status,
+    status: RecoveryReviewOperationStatusSchema.parse(row.status),
+    actorId: row.actor_id,
+    operationPayloadDigest: row.operation_payload_digest,
     evidenceEnvelopeDigest: row.evidence_envelope_digest,
     resultPlanId: row.result_plan_id,
     resultToolRunId: row.result_tool_run_id,
@@ -113,9 +149,10 @@ export class RecoveryReviewOperationRepository {
           INSERT INTO recovery_review_operations (
             id, task_id, review_id, request_key, operation,
             expected_decision_version, resulting_decision_version,
-            status, evidence_envelope_digest, result_plan_id,
+            status, actor_id, operation_payload_digest,
+            evidence_envelope_digest, result_plan_id,
             result_tool_run_id, applied_event_id, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
       .run(
@@ -127,6 +164,8 @@ export class RecoveryReviewOperationRepository {
         parsed.expectedDecisionVersion,
         parsed.resultingDecisionVersion,
         parsed.status,
+        parsed.actorId,
+        parsed.operationPayloadDigest,
         parsed.evidenceEnvelopeDigest,
         parsed.resultPlanId,
         parsed.resultToolRunId,

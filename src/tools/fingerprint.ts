@@ -48,7 +48,7 @@ export function computeToolDefinitionFingerprint(
 } {
   return {
     toolVersion: tool.version,
-    inputSchemaHash: computeToolInputSchemaHash(tool.inputSchema),
+    inputSchemaHash: tool.inputSchemaHash,
     canonicalInputHash: computeCanonicalInputHash(validatedInput),
     mode: tool.mode,
     requiresApproval: tool.requiresApproval,

@@ -42,6 +42,11 @@ export interface OwnedTask {
   readonly fencingToken: number;
 }
 
+export interface TaskLeaseClaimResult {
+  readonly leaseRecord: TaskLeaseRecord;
+  readonly leaseClaimEventId: string;
+}
+
 const TERMINAL_TASK_STATUSES = new Set<TaskStatus>([
   "completed",
   "failed",
@@ -85,6 +90,13 @@ export class TaskLeaseManager {
   }
 
   claim(taskId: string, ownerId: string): TaskLeaseRecord {
+    return this.claimWithClaimEvent(taskId, ownerId).leaseRecord;
+  }
+
+  claimWithClaimEvent(
+    taskId: string,
+    ownerId: string,
+  ): TaskLeaseClaimResult {
     const parsed = ClaimLeaseInputSchema.parse({ taskId, ownerId });
     const now = this.now();
     const nowIso = now.toISOString();
@@ -145,7 +157,24 @@ export class TaskLeaseManager {
           event.sequence,
           permit,
         );
-        return lease;
+        if (
+          event.taskId !== task.id ||
+          event.type !== "lease.claimed" ||
+          event.entityType !== "task_lease" ||
+          event.entityId !== task.id ||
+          event.payload.fencingToken !== lease.fencingToken
+        ) {
+          throw new AppError({
+            code: "TASK_LEASE_CLAIM_EVENT_INVALID",
+            message: "Task lease claim Event is inconsistent with the lease.",
+            statusCode: 500,
+            details: [],
+          });
+        }
+        return {
+          leaseRecord: lease,
+          leaseClaimEventId: event.id,
+        };
       },
       "immediate",
     );
@@ -293,6 +322,16 @@ export class TaskLeaseManager {
     );
   }
 
+  hasActiveLease(taskId: string): boolean {
+    const lease = this.leases.getByTask(taskId);
+    return (
+      lease !== undefined &&
+      lease.ownerId !== null &&
+      lease.expiresAt !== null &&
+      lease.expiresAt > this.now().toISOString()
+    );
+  }
+
   private appendCheckpoint(
     taskId: string,
     traceId: string,
@@ -333,6 +372,7 @@ export class TaskLeaseManager {
         budget: {
           maxModelTurns: task.maxModelTurns,
           maxToolCalls: task.maxToolCalls,
+          ...(task.maxTokens === null ? {} : { maxTokens: task.maxTokens }),
         },
         metadata: { traceId },
       },
@@ -348,12 +388,13 @@ export class TaskLeaseManager {
     currentIteration: number;
     maxModelTurns: number;
     maxToolCalls: number;
+    maxTokens: number | null;
   } {
     const row = this.database
       .prepare(
         `
           SELECT id, trace_id, status, current_iteration,
-                 max_model_turns, max_tool_calls
+                 max_model_turns, max_tool_calls, max_tokens
           FROM tasks
           WHERE id = ?
         `,
@@ -366,6 +407,7 @@ export class TaskLeaseManager {
           current_iteration: number;
           max_model_turns: number;
           max_tool_calls: number;
+          max_tokens: number | null;
         }
       | undefined;
     if (row === undefined) {
@@ -383,6 +425,7 @@ export class TaskLeaseManager {
       currentIteration: row.current_iteration,
       maxModelTurns: row.max_model_turns,
       maxToolCalls: row.max_tool_calls,
+      maxTokens: row.max_tokens,
     };
   }
 

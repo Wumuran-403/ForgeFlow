@@ -48,6 +48,28 @@ export const ModelUsageSchema = z
   })
   .strict();
 
+const TokenCountsSchema = z
+  .object({
+    promptTokens: z.number().int().nonnegative().optional(),
+    completionTokens: z.number().int().nonnegative().optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const TokenUsageAggregateSchema = z
+  .object({
+    promptTokens: z.number().int().nonnegative().optional(),
+    completionTokens: z.number().int().nonnegative().optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+    source: z.enum(["provider", "estimated", "mixed", "unknown"]),
+    provider: TokenCountsSchema.optional(),
+    estimated: TokenCountsSchema.optional(),
+    providerCalls: z.number().int().nonnegative().optional(),
+    estimatedCalls: z.number().int().nonnegative().optional(),
+    unknownCalls: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
 export const ModelToolDefinitionSchema = z
   .object({
     name: ToolNameSchema,
@@ -85,6 +107,7 @@ export const ModelResponseSchema = z
 export type ToolCall = z.infer<typeof ToolCallSchema>;
 export type AgentMessage = z.infer<typeof AgentMessageSchema>;
 export type ModelUsage = z.infer<typeof ModelUsageSchema>;
+export type TokenUsageAggregate = z.infer<typeof TokenUsageAggregateSchema>;
 export type ModelToolDefinition = z.infer<typeof ModelToolDefinitionSchema>;
 export type ModelRequest = z.infer<typeof ModelRequestSchema>;
 export type AssistantMessage = z.infer<typeof AssistantMessageSchema>;

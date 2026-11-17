@@ -13,6 +13,7 @@ export type TransactionMode = "deferred" | "immediate" | "exclusive";
 
 interface WriteTransactionContext {
   readonly token: object;
+  readonly mode: "immediate" | "exclusive";
   depth: number;
 }
 
@@ -66,7 +67,8 @@ export function assertWriteTransaction(
 ): void {
   if (
     !database.inTransaction ||
-    !writeTransactionContexts.has(database)
+    !writeTransactionContexts.has(database) ||
+    writeTransactionContexts.get(database)?.mode !== "immediate"
   ) {
     throw new AppError({
       code: "WRITE_TRANSACTION_REQUIRED",
@@ -108,8 +110,16 @@ export function runInTransaction<T>(
       writeTransactionContexts.set(
         database,
         previousContext === undefined
-          ? { token: Object.freeze({}), depth: 1 }
-          : { ...previousContext, depth: previousContext.depth + 1 },
+          ? {
+              token: Object.freeze({}),
+              mode: mode === "exclusive" ? "exclusive" : "immediate",
+              depth: 1,
+            }
+          : {
+              ...previousContext,
+              mode: mode === "exclusive" ? "exclusive" : "immediate",
+              depth: previousContext.depth + 1,
+            },
       );
     }
 

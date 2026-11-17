@@ -66,17 +66,24 @@ export class LeaseHeartbeat {
 
   start(): void {
     this.timer = setInterval(() => {
-      try {
-        this.manager.heartbeat(
-          this.ownership.taskId,
-          this.ownership.leaseToken,
-          this.ownership.fencingToken,
-        );
-      } catch (error) {
-        this.fail(error);
-      }
+      this.heartbeatNow();
     }, this.intervalMs);
     this.timer.unref?.();
+  }
+
+  heartbeatNow(): void {
+    if (this.authority.revoked) {
+      return;
+    }
+    try {
+      this.manager.heartbeat(
+        this.ownership.taskId,
+        this.ownership.leaseToken,
+        this.ownership.fencingToken,
+      );
+    } catch (error) {
+      this.fail(error);
+    }
   }
 
   async stop(): Promise<void> {

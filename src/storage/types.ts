@@ -4,6 +4,7 @@ import {
   ModelRequestSchema,
   ModelResponseSchema,
   ModelUsageSchema,
+  TokenUsageAggregateSchema,
   ToolCallSchema,
 } from "../provider/types.js";
 import type { ToolMode } from "../tools/types.js";
@@ -125,6 +126,12 @@ export const RecoveryEvidencePayloadTypeSchema = z.enum([
   "readback_result",
 ]);
 
+export const RecoveryEvidenceOutcomeSchema = z.enum([
+  "observed_succeeded",
+  "observed_not_executed",
+  "inconclusive",
+]);
+
 export const RecoveryEvidenceDigestProtocolSchema = z.enum([
   "sha256-raw-v1",
   "jcs-sha256-v1",
@@ -144,6 +151,82 @@ export const RecoveryReviewOperationTypeSchema = z.enum([
   "confirm_succeeded",
   "confirm_not_executed",
   "legacy_attest",
+  "advance_decision_version",
+]);
+
+export const RecoveryReviewOperationStatusSchema = z.enum([
+  "applied",
+  "accepted",
+]);
+
+export const RecoveryEvidencePayloadStorageModeSchema = z.enum([
+  "content_addressed_file",
+  "reference_only",
+]);
+
+export const RecoveryEvidenceReadAttemptStatusSchema = z.enum([
+  "prepared",
+  "dispatching",
+  "interrupted",
+  "completed",
+  "failed",
+  "timed_out",
+  "cancelled",
+  "blocked_by_intent",
+]);
+
+export const RecoveryEvidenceReadbackReservationStatusSchema = z.enum([
+  "preparing",
+  "completed",
+  "abandoned",
+]);
+
+export const RecoveryEvidenceReadbackRetrySafetySchema = z.enum([
+  "immutable",
+  "version_conditional",
+]);
+
+export const RecoveryEvidenceReadbackConsistencyModeSchema = z.enum([
+  "immutable_version",
+  "etag_or_resource_version",
+]);
+
+export const RecoveryEvidenceVerificationCheckOriginSchema = z.enum([
+  "readback_transaction_b",
+  "stored_evidence_v0",
+]);
+
+export const RecoveryEvidenceAvailabilityResultStatusSchema = z.enum([
+  "available",
+  "unavailable",
+  "expired",
+  "replaced",
+  "digest_mismatch",
+]);
+
+export const RecoveryEvidenceIntegrityStatusSchema = z.enum([
+  "not_checked",
+  "matched",
+  "mismatch",
+]);
+
+export const RecoveryEvidenceAuthenticityStatusSchema = z.enum([
+  "unverified",
+  "manual_attested",
+  "system_verified",
+]);
+
+export const RecoveryEvidenceVerificationResultStatusSchema = z.enum([
+  "not_run",
+  "passed",
+  "failed",
+  "inconclusive",
+]);
+
+export const RecoveryEvidenceReadbackProvenanceSchema = z.enum([
+  "none",
+  "declared_payload",
+  "controlled_runtime_read",
 ]);
 
 export const MessageToolCallsSchema = z.array(ToolCallSchema);
@@ -152,7 +235,7 @@ export const CheckpointBudgetSchema = z
   .object({
     maxModelTurns: z.number().int().positive(),
     maxToolCalls: z.number().int().nonnegative(),
-    maxTokens: z.number().int().nonnegative().optional(),
+    maxTokens: z.number().int().positive().optional(),
   })
   .strict();
 export const CheckpointMetadataSchema = z.record(z.string(), z.unknown());
@@ -181,7 +264,8 @@ export const CreateTaskInputSchema = z
     systemPrompt: z.string().trim().min(1),
     maxModelTurns: z.number().int().positive(),
     maxToolCalls: z.number().int().nonnegative(),
-    tokenUsage: ModelUsageSchema.default({ source: "unknown" }),
+    maxTokens: z.number().int().positive().optional(),
+    tokenUsage: TokenUsageAggregateSchema.default({ source: "unknown" }),
   })
   .strict();
 
@@ -273,6 +357,9 @@ export type RecoveryReviewSource = z.infer<
 export type RecoveryEvidencePayloadType = z.infer<
   typeof RecoveryEvidencePayloadTypeSchema
 >;
+export type RecoveryEvidenceOutcome = z.infer<
+  typeof RecoveryEvidenceOutcomeSchema
+>;
 export type RecoveryEvidenceDigestProtocol = z.infer<
   typeof RecoveryEvidenceDigestProtocolSchema
 >;
@@ -281,6 +368,42 @@ export type RecoveryLegacyAttestationResult = z.infer<
 >;
 export type RecoveryReviewOperationType = z.infer<
   typeof RecoveryReviewOperationTypeSchema
+>;
+export type RecoveryReviewOperationStatus = z.infer<
+  typeof RecoveryReviewOperationStatusSchema
+>;
+export type RecoveryEvidencePayloadStorageMode = z.infer<
+  typeof RecoveryEvidencePayloadStorageModeSchema
+>;
+export type RecoveryEvidenceReadAttemptStatus = z.infer<
+  typeof RecoveryEvidenceReadAttemptStatusSchema
+>;
+export type RecoveryEvidenceReadbackReservationStatus = z.infer<
+  typeof RecoveryEvidenceReadbackReservationStatusSchema
+>;
+export type RecoveryEvidenceReadbackRetrySafety = z.infer<
+  typeof RecoveryEvidenceReadbackRetrySafetySchema
+>;
+export type RecoveryEvidenceReadbackConsistencyMode = z.infer<
+  typeof RecoveryEvidenceReadbackConsistencyModeSchema
+>;
+export type RecoveryEvidenceVerificationCheckOrigin = z.infer<
+  typeof RecoveryEvidenceVerificationCheckOriginSchema
+>;
+export type RecoveryEvidenceAvailabilityResultStatus = z.infer<
+  typeof RecoveryEvidenceAvailabilityResultStatusSchema
+>;
+export type RecoveryEvidenceIntegrityStatus = z.infer<
+  typeof RecoveryEvidenceIntegrityStatusSchema
+>;
+export type RecoveryEvidenceAuthenticityStatus = z.infer<
+  typeof RecoveryEvidenceAuthenticityStatusSchema
+>;
+export type RecoveryEvidenceVerificationResultStatus = z.infer<
+  typeof RecoveryEvidenceVerificationResultStatusSchema
+>;
+export type RecoveryEvidenceReadbackProvenance = z.infer<
+  typeof RecoveryEvidenceReadbackProvenanceSchema
 >;
 export type CreateTaskInput = z.input<typeof CreateTaskInputSchema>;
 export type NewMessageInput = z.input<typeof NewMessageInputSchema>;
@@ -297,7 +420,8 @@ export interface TaskRecord {
   readonly currentIteration: number;
   readonly maxModelTurns: number;
   readonly maxToolCalls: number;
-  readonly tokenUsage: z.infer<typeof ModelUsageSchema>;
+  readonly maxTokens: number | null;
+  readonly tokenUsage: z.infer<typeof TokenUsageAggregateSchema>;
   readonly version: number;
   readonly cancelRequestedAt: string | null;
   readonly pauseRequestedAt: string | null;
@@ -367,6 +491,10 @@ export interface CheckpointRecord {
 export interface ExecutionPlanRecord {
   readonly id: string;
   readonly taskId: string;
+  /**
+   * Immutable Task-scoped plan generation identity. Status transitions use it
+   * for CAS but must not increment it.
+   */
   readonly version: number;
   readonly sourceModelCallId: string;
   readonly purpose: ExecutionPlanPurpose;
@@ -459,6 +587,171 @@ export interface RecoveryEvidenceReadRecord {
   readonly reviewId: string;
   readonly toolRunId: string;
   readonly evidenceEnvelopeDigest: string;
+  readonly evidenceSubmissionId: string | null;
+  readonly readbackRequestId: string | null;
+  readonly readAttemptId: string | null;
+  readonly verificationCheckId: string | null;
+  readonly observedAt: string | null;
+  readonly resourceVersion: string | null;
+  readonly resourceEtag: string | null;
+  readonly resultPayloadDigest: string | null;
+  readonly resultPayloadStoreRef: string | null;
+  readonly resultPayloadStorageMode: RecoveryEvidencePayloadStorageMode | null;
+  readonly createdAt: string;
+}
+
+export interface RecoveryEvidenceReadbackRequestRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly evidenceSubmissionId: string;
+  readonly originalToolRunId: string;
+  readonly requestKey: string;
+  readonly operationId: string;
+  readonly executionPlanId: string;
+  readonly planStepId: string;
+  readonly readToolRunId: string;
+  readonly verifierId: string;
+  readonly verifierVersion: string;
+  readonly verifierConfigDigest: string;
+  readonly allowlistId: string;
+  readonly allowlistVersion: string;
+  readonly readToolName: string;
+  readonly readToolVersion: string;
+  readonly readToolSchemaHash: string;
+  readonly retrySafety: RecoveryEvidenceReadbackRetrySafety;
+  readonly consistencyMode: RecoveryEvidenceReadbackConsistencyMode;
+  readonly expectedResourceVersion: string | null;
+  readonly expectedEtag: string | null;
+  readonly verificationCheckId: string;
+  readonly createdAt: string;
+}
+
+export interface RecoveryEvidenceReadAttemptRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly readbackRequestId: string;
+  readonly readToolRunId: string;
+  readonly attemptNumber: number;
+  readonly retrySafety: RecoveryEvidenceReadbackRetrySafety;
+  readonly consistencyMode: RecoveryEvidenceReadbackConsistencyMode;
+  readonly status: RecoveryEvidenceReadAttemptStatus;
+  readonly preparedAt: string;
+  readonly dispatchingAt: string | null;
+  readonly interruptedAt: string | null;
+  readonly completedAt: string | null;
+  readonly observedAt: string | null;
+  readonly resourceVersion: string | null;
+  readonly resourceEtag: string | null;
+  readonly resultDigest: string | null;
+  readonly resultPayloadStoreRef: string | null;
+  readonly reasonCode: string | null;
+  readonly lastEventId: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface RecoveryEvidenceReadbackReservationRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly evidenceSubmissionId: string;
+  readonly originalToolRunId: string;
+  readonly requestId: string;
+  readonly operationId: string;
+  readonly executionPlanId: string;
+  readonly planStepId: string;
+  readonly readToolRunId: string;
+  readonly readAttemptId: string;
+  readonly verificationCheckId: string;
+  readonly requestIntentDigest: string;
+  readonly ownerToken: string;
+  readonly ownerFencingToken: number;
+  readonly status: RecoveryEvidenceReadbackReservationStatus;
+  readonly reservationVersion: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface RecoveryEvidenceVerificationCheckRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly evidenceSubmissionId: string;
+  readonly originalToolRunId: string;
+  readonly readbackRequestId: string | null;
+  readonly evidenceReadId: string | null;
+  readonly verificationCheckId: string;
+  readonly requestKey: string;
+  readonly checkOrigin: RecoveryEvidenceVerificationCheckOrigin;
+  readonly verifierId: string;
+  readonly verifierVersion: string;
+  readonly verifierConfigDigest: string;
+  readonly allowlistId: string | null;
+  readonly allowlistVersion: string | null;
+  readonly readToolName: string | null;
+  readonly readToolVersion: string | null;
+  readonly readToolSchemaHash: string | null;
+  readonly expectedPayloadDigest: string;
+  readonly createdAt: string;
+}
+
+export interface RecoveryEvidenceVerificationRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly evidenceSubmissionId: string;
+  readonly originalToolRunId: string;
+  readonly readbackRequestId: string | null;
+  readonly evidenceReadId: string | null;
+  readonly readAttemptId: string | null;
+  readonly verificationCheckId: string;
+  readonly readbackResultProvenance: RecoveryEvidenceReadbackProvenance;
+  readonly verifierId: string;
+  readonly verifierVersion: string;
+  readonly verifierConfigDigest: string;
+  readonly allowlistId: string | null;
+  readonly allowlistVersion: string | null;
+  readonly requestKey: string;
+  readonly availabilityStatus: RecoveryEvidenceAvailabilityResultStatus;
+  readonly integrityStatus: RecoveryEvidenceIntegrityStatus;
+  readonly authenticityStatus: RecoveryEvidenceAuthenticityStatus;
+  readonly verificationStatus: RecoveryEvidenceVerificationResultStatus;
+  readonly expectedPayloadDigest: string;
+  readonly observedPayloadDigest: string | null;
+  readonly reasonCode: string;
+  readonly redactedSummary: string | null;
+  readonly availabilityEventId: string;
+  readonly verificationEventId: string | null;
+  readonly createdAt: string;
+}
+
+export interface RecoveryEvidenceSubmissionRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly reviewId: string;
+  readonly toolRunId: string;
+  readonly operationId: string;
+  readonly requestKey: string;
+  readonly decisionVersion: number;
+  readonly sourceType: RecoveryReviewSource;
+  readonly outcome: RecoveryEvidenceOutcome;
+  readonly evidenceRef: string;
+  readonly resourceRef: string | null;
+  readonly resourceVersion: string | null;
+  readonly sourceObservedAt: string;
+  readonly submittedAt: string;
+  readonly actorId: string | null;
+  readonly verifierId: string | null;
+  readonly verificationId: string | null;
+  readonly payloadType: RecoveryEvidencePayloadType;
+  readonly payloadDigestProtocol: RecoveryEvidenceDigestProtocol;
+  readonly payloadDigest: string;
+  readonly envelopeDigest: string;
+  readonly payloadStoreRef: string | null;
+  readonly payloadStorageMode: RecoveryEvidencePayloadStorageMode;
+  readonly appliedEventId: string;
   readonly createdAt: string;
 }
 
@@ -489,7 +782,9 @@ export interface RecoveryReviewOperationRecord {
   readonly operation: RecoveryReviewOperationType;
   readonly expectedDecisionVersion: number;
   readonly resultingDecisionVersion: number;
-  readonly status: string;
+  readonly status: RecoveryReviewOperationStatus;
+  readonly actorId: string | null;
+  readonly operationPayloadDigest: string | null;
   readonly evidenceEnvelopeDigest: string | null;
   readonly resultPlanId: string | null;
   readonly resultToolRunId: string | null;
@@ -522,7 +817,12 @@ export interface TaskSnapshot {
   readonly toolRuns: readonly ToolRunRecord[];
   readonly approvals: readonly ApprovalRecord[];
   readonly recoveryReviews: readonly RecoveryReviewRecord[];
+  readonly recoveryEvidenceReadbackRequests: readonly RecoveryEvidenceReadbackRequestRecord[];
+  readonly recoveryEvidenceReadAttempts: readonly RecoveryEvidenceReadAttemptRecord[];
   readonly recoveryEvidenceReads: readonly RecoveryEvidenceReadRecord[];
+  readonly recoveryEvidenceVerificationChecks: readonly RecoveryEvidenceVerificationCheckRecord[];
+  readonly recoveryEvidenceVerifications: readonly RecoveryEvidenceVerificationRecord[];
+  readonly recoveryEvidenceSubmissions: readonly RecoveryEvidenceSubmissionRecord[];
   readonly recoveryLegacyAttestations: readonly RecoveryLegacyAttestationRecord[];
   readonly recoveryReviewOperations: readonly RecoveryReviewOperationRecord[];
 }

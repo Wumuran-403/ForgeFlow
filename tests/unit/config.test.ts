@@ -14,6 +14,11 @@ describe("loadConfig", () => {
     expect(config.llm.model).toBe("mock-model");
     expect(config.llm.apiKey).toBeUndefined();
     expect(config.database.path).toBe(DEFAULT_DATABASE_PATH);
+    expect(config.context).toEqual({
+      maxContextTokens: 16_384,
+      reservedCompletionTokens: 2_048,
+      maxToolResultTokens: 1_024,
+    });
   });
 
   it("requires provider credentials for DeepSeek", () => {
@@ -34,6 +39,12 @@ describe("loadConfig", () => {
   it("rejects invalid numeric limits", () => {
     expect(() => loadConfig({ LLM_TIMEOUT_MS: "0" })).toThrow(ConfigurationError);
     expect(() => loadConfig({ LLM_MAX_RETRIES: "-1" })).toThrow(ConfigurationError);
+    expect(() => loadConfig({
+      LLM_CONTEXT_MAX_TOKENS: "100",
+      LLM_CONTEXT_RESERVED_COMPLETION_TOKENS: "100",
+    })).toThrow(ConfigurationError);
+    expect(() => loadConfig({ LLM_TOOL_RESULT_MAX_TOKENS: "0" }))
+      .toThrow(ConfigurationError);
   });
 
   it("accepts an explicit database path without creating it", () => {

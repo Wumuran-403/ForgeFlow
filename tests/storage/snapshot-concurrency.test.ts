@@ -6,6 +6,7 @@ import {
   ApprovalRepository,
   CheckpointStore,
   closeDatabase,
+  computeRecoveryEvidenceVerificationRequestKey,
   EventRepository,
   ExecutionPlanRepository,
   ExecutionUnitOfWork,
@@ -13,6 +14,8 @@ import {
   migrateStorage,
   openDatabase,
   PlanStepRepository,
+  RecoveryEvidenceReadbackRequestRepository,
+  RecoveryEvidenceUnitOfWork,
   RecoveryReviewRepository,
   runInTransaction,
   SequenceAllocator,
@@ -32,6 +35,7 @@ import {
   createTemporaryDatabase,
   type TemporaryDatabase,
 } from "./test-database.js";
+import { createRecoveryEvidenceUowFixture } from "./recovery-evidence-uow-fixture.js";
 
 let temporaryDatabase: TemporaryDatabase | undefined;
 let readerDatabase: ForgeFlowDatabase | undefined;
@@ -213,6 +217,94 @@ describe("TaskSnapshot read consistency", () => {
     expect(
       second.planSteps.map((step) => step.stepIndex),
     ).toEqual([0, 1, 2, 3]);
+  });
+
+  it("keeps recovery verification tables on one WAL snapshot", () => {
+    temporaryDatabase = createTemporaryDatabase();
+    readerDatabase = openDatabase(temporaryDatabase.path);
+    migrateStorage(readerDatabase);
+    const fixture = createRecoveryEvidenceUowFixture(
+      readerDatabase,
+      "snapshot-verification",
+    );
+    writerDatabase = openDatabase(temporaryDatabase.path);
+    const writer = writerDatabase;
+    const writerLease = new TaskLeaseManager(writer, {
+      now: () => new Date("2026-11-08T00:00:00.000Z"),
+      leaseTtlMs: 60_000,
+    });
+    const writerUnitOfWork = new RecoveryEvidenceUnitOfWork(
+      writer,
+      () => undefined,
+      writerLease,
+    );
+    const originalListByTask =
+      RecoveryEvidenceReadbackRequestRepository.prototype.listByTask;
+    let injectedWrite = false;
+
+    vi.spyOn(
+      RecoveryEvidenceReadbackRequestRepository.prototype,
+      "listByTask",
+    ).mockImplementation(
+      function (
+        this: RecoveryEvidenceReadbackRequestRepository,
+        taskId: string,
+      ) {
+        const requests = originalListByTask.call(this, taskId);
+        if (!injectedWrite) {
+          injectedWrite = true;
+          expect(readerDatabase?.inTransaction).toBe(true);
+          writerUnitOfWork.createOwnedRecoveryEvidenceVerificationCheck({
+            ownership: fixture.ownership,
+            expectedTaskVersion: fixture.expectedTaskVersion,
+            checkRecordId: "check-snapshot-writer",
+            reviewId: fixture.reviewId,
+            evidenceSubmissionId: fixture.evidenceSubmissionId,
+            originalToolRunId: fixture.originalToolRunId,
+            verificationCheckId: "check-snapshot-writer-id",
+            requestKey: computeRecoveryEvidenceVerificationRequestKey({
+              taskId: fixture.taskId,
+              reviewId: fixture.reviewId,
+              evidenceSubmissionId: fixture.evidenceSubmissionId,
+              originalToolRunId: fixture.originalToolRunId,
+              verificationCheckId: "check-snapshot-writer-id",
+              checkOrigin: "stored_evidence_v0",
+              verifierId: "host_verifier",
+              verifierVersion: "1",
+              verifierConfigDigest: `sha256:${"6".repeat(64)}`,
+              allowlistId: null,
+              allowlistVersion: null,
+              readToolName: null,
+              readToolVersion: null,
+              readToolSchemaHash: null,
+              expectedPayloadDigest: `sha256:${"c".repeat(64)}`,
+            }),
+            checkOrigin: "stored_evidence_v0",
+            verifierId: "host_verifier",
+            verifierVersion: "1",
+            verifierConfigDigest: `sha256:${"6".repeat(64)}`,
+            allowlistId: null,
+            allowlistVersion: null,
+            readToolName: null,
+            readToolVersion: null,
+            readToolSchemaHash: null,
+            expectedPayloadDigest: `sha256:${"c".repeat(64)}`,
+          });
+        }
+        return requests;
+      },
+    );
+
+    const first = new TaskSnapshotReader(readerDatabase).load(
+      fixture.taskId,
+    );
+    expect(first.recoveryEvidenceVerificationChecks).toHaveLength(0);
+
+    vi.restoreAllMocks();
+    const second = new TaskSnapshotReader(readerDatabase).load(
+      fixture.taskId,
+    );
+    expect(second.recoveryEvidenceVerificationChecks).toHaveLength(1);
   });
 });
 

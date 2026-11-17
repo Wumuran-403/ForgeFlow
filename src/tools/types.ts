@@ -34,6 +34,8 @@ export interface ToolExecutionContext {
 
 export interface ValidatedToolInput {
   readonly toolName: string;
+  readonly toolVersion: string;
+  readonly inputSchemaHash: string;
   readonly mode: ToolMode;
   readonly timeoutMs: number;
   readonly requiresApproval: boolean;
@@ -43,6 +45,7 @@ export interface ValidatedToolInput {
 export interface RegisteredToolMetadata extends ToolMetadata {
   readonly version: string;
   readonly inputSchema: z.ZodType<unknown>;
+  readonly inputSchemaHash: string;
   readonly timeoutMs: number;
   readonly requiresApproval: boolean;
 }

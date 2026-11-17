@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { resolve } from "node:path";
+import { z } from "zod";
 
 import { AppError } from "../shared/errors.js";
 import {
@@ -13,9 +15,11 @@ import {
 import {
   ExecutionStateMachine,
   ExecutionUnitOfWork,
+  JsonValueSchema,
   TaskLeaseManager,
   TaskSnapshotReader,
   type PlanStepRecord,
+  type RecoveryReviewOperationCommitResult,
   type TaskSnapshot,
   type ToolRunRecord,
 } from "../storage/index.js";
@@ -26,6 +30,17 @@ import {
 } from "../tools/fingerprint.js";
 import type { ValidatedToolInput } from "../tools/types.js";
 import { RecoveryClassifier } from "./recovery-classifier.js";
+import {
+  FileEvidencePayloadStore,
+  type EvidencePayloadStore,
+} from "./evidence-payload-store.js";
+import { RecoveryReviewDecisionService } from "./recovery-review-decision-service.js";
+import {
+  MarkRecoveryReviewUnresolvedInputSchema,
+  SubmitRecoveryEvidenceInputSchema,
+  type MarkRecoveryReviewUnresolvedInput,
+  type SubmitRecoveryEvidenceInput,
+} from "./recovery-review-submission.js";
 import { RecoveryScanner } from "./recovery-scanner.js";
 import type {
   RecoveryCandidate,
@@ -36,6 +51,12 @@ import type {
   ReadRecoveryResult,
 } from "./recovery-types.js";
 
+// This neutral CAS probe is available only to internal tests. Production
+// review operations will expose operation-specific manager methods later.
+export const RECOVERY_REVIEW_INTERNAL_TEST_OPERATION = Symbol(
+  "forgeflow.recovery-review.internal-test-operation",
+);
+
 export interface RecoveryManagerOptions {
   readonly database: Database.Database;
   readonly leaseManager: TaskLeaseManager;
@@ -43,7 +64,24 @@ export interface RecoveryManagerOptions {
   readonly now?: () => Date;
   readonly readWorkerPool?: ReadWorkerPool;
   readonly heartbeatIntervalMs?: number;
+  readonly evidencePayloadStore?: EvidencePayloadStore;
 }
+
+const CommitRecoveryReviewOperationInputSchema = z
+  .object({
+    taskId: z.string().min(1),
+    reviewId: z.string().min(1),
+    expectedDecisionVersion: z.number().int().nonnegative(),
+    operation: z.literal("advance_decision_version"),
+    actorId: z.string().trim().min(1),
+    operationPayload: JsonValueSchema,
+    requestKey: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  })
+  .strict();
+
+export type CommitRecoveryReviewOperationInput = z.input<
+  typeof CommitRecoveryReviewOperationInputSchema
+>;
 
 const READ_RECOVERY_BLOCKING_CLASSIFICATIONS = new Set<RecoveryClassification>([
   "state_inconsistent",
@@ -61,6 +99,7 @@ export class RecoveryManager {
   private readonly classifier: RecoveryClassifier;
   private readonly now: () => Date;
   private readonly stateMachine: ExecutionStateMachine;
+  private readonly decisionService: RecoveryReviewDecisionService;
   private readonly readWorkerPool: ReadWorkerPool | undefined;
   private readonly heartbeatIntervalMs: number;
 
@@ -77,6 +116,16 @@ export class RecoveryManager {
       options.database,
       options.leaseManager,
       options.now === undefined ? {} : { now: options.now },
+    );
+    const evidencePayloadStore =
+      options.evidencePayloadStore ??
+      new FileEvidencePayloadStore(
+        resolve(process.cwd(), "data", "evidence"),
+      );
+    this.decisionService = new RecoveryReviewDecisionService(
+      options.database,
+      options.leaseManager,
+      evidencePayloadStore,
     );
     this.readWorkerPool =
       options.readWorkerPool ??
@@ -104,7 +153,45 @@ export class RecoveryManager {
   }
 
   recoverTask(taskId: string, ownerId: string): RecoveryReport {
-    return this.inspectTask(taskId, ownerId);
+    const ownership = this.claimInspectionLease(taskId, ownerId);
+    let report: RecoveryReport | undefined;
+    let failure: unknown;
+    try {
+      let snapshot = this.snapshotReader.load(taskId);
+      const unitOfWork = new ExecutionUnitOfWork(
+        this.options.database,
+        this.options.leaseManager,
+      );
+      for (const run of snapshot.toolRuns.filter(
+        (candidate) => candidate.mode === "write" && candidate.status === "running",
+      )) {
+        snapshot = unitOfWork.recoverOwnedRunningWriteAsUnknown(
+          {
+            toolRunId: run.id,
+            expectedToolRunVersion: run.version,
+            ownership,
+          },
+        );
+      }
+      report = this.inspectOwnedTask(ownership);
+    } catch (error) {
+      failure = error;
+    }
+    let releaseFailure: unknown;
+    try {
+      this.releaseInspectionLease(ownership);
+    } catch (error) {
+      releaseFailure = error;
+    }
+    if (failure !== undefined && releaseFailure !== undefined) {
+      throw new AggregateError(
+        [failure, releaseFailure],
+        "Task recovery and lease release both failed.",
+      );
+    }
+    if (releaseFailure !== undefined) throw releaseFailure;
+    if (failure !== undefined) throw failure;
+    return report as RecoveryReport;
   }
 
   async recoverReadRuns(
@@ -179,6 +266,214 @@ export class RecoveryManager {
       throw failure;
     }
     return result as ReadRecoveryResult;
+  }
+
+  async [RECOVERY_REVIEW_INTERNAL_TEST_OPERATION](
+    input: CommitRecoveryReviewOperationInput,
+    ownerId: string,
+  ): Promise<RecoveryReviewOperationCommitResult> {
+    const parsed = CommitRecoveryReviewOperationInputSchema.parse(input);
+    return this.runWithReviewLease(
+      parsed.taskId,
+      parsed.reviewId,
+      ownerId,
+      (_snapshot, ownership, authority) =>
+        this.decisionService.commitOwned(
+          {
+            reviewId: parsed.reviewId,
+            expectedDecisionVersion: parsed.expectedDecisionVersion,
+            operation: parsed.operation,
+            actorId: parsed.actorId,
+            operationPayload: parsed.operationPayload,
+            requestKey: parsed.requestKey,
+          },
+          ownership,
+          _snapshot.task.version,
+          () => authority.assertActive(),
+        ),
+    );
+  }
+
+  async submitRecoveryEvidence(
+    input: SubmitRecoveryEvidenceInput,
+    ownerId: string,
+  ): Promise<RecoveryReviewOperationCommitResult> {
+    const parsed = SubmitRecoveryEvidenceInputSchema.parse(input);
+    return this.runWithReviewLease(
+      parsed.taskId,
+      parsed.reviewId,
+      ownerId,
+      (snapshot, ownership, authority, _review, toolRun) => {
+        if (toolRun.id !== parsed.binding.toolRunId) {
+          throw new AppError({
+            code: "RECOVERY_EVIDENCE_BINDING_MISMATCH",
+            message: "Evidence ToolRun does not match the recovery review.",
+            statusCode: 409,
+            details: [],
+          });
+        }
+        return this.decisionService.submitEvidenceOwned(
+          parsed,
+          ownership,
+          snapshot.task.version,
+          this.now().toISOString(),
+          () => authority.assertActive(),
+        );
+      },
+    );
+  }
+
+  async markRecoveryReviewUnresolved(
+    input: MarkRecoveryReviewUnresolvedInput,
+    ownerId: string,
+  ): Promise<RecoveryReviewOperationCommitResult> {
+    const parsed =
+      MarkRecoveryReviewUnresolvedInputSchema.parse(input);
+    return this.runWithReviewLease(
+      parsed.taskId,
+      parsed.reviewId,
+      ownerId,
+      (snapshot, ownership, authority, _review) =>
+        this.decisionService.markUnresolvedOwned(
+          parsed,
+          ownership,
+          snapshot.task.version,
+          () => authority.assertActive(),
+        ),
+    );
+  }
+
+  private async runWithReviewLease<T>(
+    taskId: string,
+    reviewId: string,
+    ownerId: string,
+    operation: (
+      snapshot: TaskSnapshot,
+      ownership: RecoveryInspectionOwnership,
+      authority: ExecutionAuthority,
+      review: TaskSnapshot["recoveryReviews"][number],
+      toolRun: ToolRunRecord,
+    ) => T,
+  ): Promise<T> {
+    const ownership = this.claimInspectionLease(taskId, ownerId);
+    const authority = new ExecutionAuthority();
+    const heartbeat = new LeaseHeartbeat(
+      this.options.leaseManager,
+      ownership,
+      this.heartbeatIntervalMs,
+      authority,
+    );
+    heartbeat.start();
+    heartbeat.heartbeatNow();
+    let result: T | undefined;
+    let failure: unknown;
+
+    try {
+      authority.assertActive();
+      const snapshot = this.snapshotReader.load(taskId);
+      const review = snapshot.recoveryReviews.find(
+        (candidate) => candidate.id === reviewId,
+      );
+      if (review === undefined || review.taskId !== taskId) {
+        throw new AppError({
+          code: "RECOVERY_REVIEW_NOT_FOUND",
+          message: "Recovery review was not found for the task.",
+          statusCode: 404,
+          details: [],
+        });
+      }
+      if (review.reviewProtocolVersion < 1) {
+        throw new AppError({
+          code: "RECOVERY_REVIEW_PROTOCOL_REQUIRED",
+          message:
+            "Lease-owned review operations require protocol v1.",
+          statusCode: 409,
+          details: [],
+        });
+      }
+      if (!["pending", "unresolved"].includes(review.status)) {
+        throw new AppError({
+          code: "RECOVERY_REVIEW_NOT_ACTIVE",
+          message: "Recovery review is not active.",
+          statusCode: 409,
+          details: [],
+        });
+      }
+      const toolRun = snapshot.toolRuns.find(
+        (candidate) => candidate.id === review.toolRunId,
+      );
+      if (
+        toolRun === undefined ||
+        toolRun.taskId !== taskId ||
+        toolRun.mode !== "write" ||
+        toolRun.status !== "unknown"
+      ) {
+        throw new AppError({
+          code: "RECOVERY_REVIEW_TARGET_INVALID",
+          message: "Recovery review target is not an unknown write.",
+          statusCode: 409,
+          details: [],
+        });
+      }
+
+      result = operation(
+        snapshot,
+        ownership,
+        authority,
+        review,
+        toolRun,
+      );
+      if (heartbeat.failure !== undefined) {
+        throw new AppError({
+          code: "TASK_LEASE_HEARTBEAT_FAILED",
+          message:
+            "Task lease heartbeat failed during review operation commit.",
+          statusCode: 409,
+          details: [],
+          cause: heartbeat.failure,
+        });
+      }
+    } catch (error) {
+      failure =
+        heartbeat.failure === undefined
+          ? error
+          : new AppError({
+              code: "TASK_LEASE_HEARTBEAT_FAILED",
+              message:
+                "Task lease heartbeat failed during review operation commit.",
+              statusCode: 409,
+              details: [],
+              cause: heartbeat.failure,
+            });
+    }
+    await heartbeat.stop();
+
+    let releaseFailure: unknown;
+    try {
+      this.releaseInspectionLease(ownership);
+    } catch (error) {
+      releaseFailure = error;
+    }
+
+    if (failure !== undefined && releaseFailure !== undefined) {
+      throw new AggregateError(
+        [failure, releaseFailure],
+        "Review operation and lease release both failed.",
+      );
+    }
+    if (releaseFailure !== undefined) {
+      throw new AppError({
+        code: "RECOVERY_REVIEW_LEASE_RELEASE_FAILED",
+        message: "Review operation lease could not be released.",
+        statusCode: 500,
+        details: [],
+        cause: releaseFailure,
+      });
+    }
+    if (failure !== undefined) {
+      throw failure;
+    }
+    return result as T;
   }
 
   inspectTask(taskId: string, ownerId: string): RecoveryReport {

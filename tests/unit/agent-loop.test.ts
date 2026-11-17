@@ -29,6 +29,37 @@ function createEchoRegistry(
 }
 
 describe("AgentRunner", () => {
+  it("stops a non-persistent run before the next provider request when its token budget is exhausted", async () => {
+    const registry = createEchoRegistry(async ({ label }) => ({ label }));
+    const provider = new MockLLMProvider([
+      {
+        content: "Read once.",
+        toolCalls: [{ id: "budget-call", name: "demo_echo", arguments: { label: "budget" } }],
+        usage: {
+          promptTokens: 2_000,
+          completionTokens: 1_000,
+          totalTokens: 3_000,
+          source: "provider",
+        },
+      },
+      "Must not be requested.",
+    ]);
+    const result = await new AgentRunner({
+      provider,
+      registry,
+      model: "mock-model",
+      maxTaskTokens: 5_000,
+    }).run({ objective: "Respect the task token budget." });
+
+    expect(result).toMatchObject({
+      status: "limit_reached",
+      stopReason: "task_token_budget_exhausted",
+      modelRequests: 1,
+    });
+    expect(provider.consumedResponseCount).toBe(1);
+    expect(result.toolResults).toHaveLength(1);
+  });
+
   it("returns a direct final answer without requesting tools", async () => {
     const provider = new MockLLMProvider(["Direct answer."]);
     const result = await new AgentRunner({

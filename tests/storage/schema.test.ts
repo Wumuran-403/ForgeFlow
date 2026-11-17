@@ -44,12 +44,23 @@ describe("storage schema through Step 4", () => {
     expect(tables).toEqual([
       "approvals",
       "checkpoints",
+      "evaluation_case_results",
+      "evaluation_metrics",
+      "evaluation_runs",
       "events",
       "execution_plans",
+      "global_model_budget_days",
+      "global_model_budget_reservations",
       "messages",
       "model_calls",
       "plan_steps",
+      "recovery_evidence_read_attempts",
+      "recovery_evidence_readback_request_reservations",
+      "recovery_evidence_readback_requests",
       "recovery_evidence_reads",
+      "recovery_evidence_submissions",
+      "recovery_evidence_verification_checks",
+      "recovery_evidence_verifications",
       "recovery_legacy_attestations",
       "recovery_review_operations",
       "recovery_reviews",
@@ -85,6 +96,9 @@ describe("storage schema through Step 4", () => {
     expect(tasks.find((item) => item.name === "id")).toMatchObject({
       pk: 1,
     });
+    expect(tasks.find((item) => item.name === "max_tokens")).toMatchObject({
+      notnull: 0,
+    });
 
     expect(database.pragma("foreign_key_list(checkpoints)")).toContainEqual(
       expect.objectContaining({
@@ -100,6 +114,19 @@ describe("storage schema through Step 4", () => {
         to: "id",
       }),
     );
+  });
+
+  it("enforces a positive optional task token budget", () => {
+    temporaryDatabase = createTemporaryDatabase();
+    database = openDatabase(temporaryDatabase.path);
+    migrateStorage(database);
+    insertTask(database, "task-budget");
+    expect(database.prepare("SELECT max_tokens FROM tasks WHERE id = ?")
+      .get("task-budget")).toEqual({ max_tokens: null });
+    database.prepare("UPDATE tasks SET max_tokens = 50000 WHERE id = ?")
+      .run("task-budget");
+    expect(() => database?.prepare("UPDATE tasks SET max_tokens = 0 WHERE id = ?")
+      .run("task-budget")).toThrow();
   });
 
   it("enforces status, role, and message-shape CHECK constraints", () => {
@@ -209,12 +236,12 @@ describe("storage schema through Step 4", () => {
     database = openDatabase(temporaryDatabase.path);
 
     expect(migrateStorage(database)).toMatchObject({
-      appliedVersions: [1, 2, 3, 4],
-      currentVersion: 4,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      currentVersion: 12,
     });
     expect(migrateStorage(database)).toMatchObject({
       appliedVersions: [],
-      currentVersion: 4,
+      currentVersion: 12,
     });
   });
 });

@@ -7,12 +7,12 @@ import {
   PHASE3_STORAGE_MIGRATIONS,
   RecoveryEvidenceReadRepository,
   RecoveryLegacyAttestationRepository,
-  RecoveryReviewOperationRepository,
   runInTransaction,
   runMigrations,
   type ForgeFlowDatabase,
   type SynchronousOperation,
 } from "../../src/storage/index.js";
+import { RecoveryReviewOperationRepository } from "../../src/storage/recovery-review-operation-repository.js";
 import {
   createStorageWritePermit,
   type StorageWritePermit,
@@ -167,8 +167,8 @@ describe("Step 6.3.1 migration and schema", () => {
     insertLegacyTaskFixture(activeDatabase, "legacy");
 
     expect(migrateStorage(activeDatabase)).toMatchObject({
-      appliedVersions: [4],
-      currentVersion: 4,
+      appliedVersions: [4, 5, 6, 7, 8, 9, 10, 11, 12],
+      currentVersion: 12,
     });
 
     const review = activeDatabase
@@ -290,7 +290,9 @@ describe("Step 6.3.1 migration and schema", () => {
             operation: "request_readback",
             expectedDecisionVersion: 0,
             resultingDecisionVersion: 1,
-            status: "applied",
+            status: "accepted",
+            actorId: "actor-host",
+            operationPayloadDigest: digest("a"),
             evidenceEnvelopeDigest: null,
             resultPlanId: "evidence-plan-a",
             resultToolRunId: "evidence-run-b",
@@ -421,7 +423,9 @@ describe("Step 6.3.1 migration and schema", () => {
           operation: "request_readback",
           expectedDecisionVersion: 0,
           resultingDecisionVersion: 1,
-          status: "applied",
+          status: "accepted",
+          actorId: "actor-host",
+          operationPayloadDigest: digest("a"),
           evidenceEnvelopeDigest: null,
           resultPlanId: "evidence-plan-a",
           resultToolRunId: "evidence-run-a",

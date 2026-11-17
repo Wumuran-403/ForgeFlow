@@ -12,7 +12,6 @@ import {
   PlanStepRepository,
   RecoveryEvidenceReadRepository,
   RecoveryLegacyAttestationRepository,
-  RecoveryReviewOperationRepository,
   RecoveryReviewRepository,
   runInTransaction,
   SequenceAllocator,
@@ -21,6 +20,7 @@ import {
   type ForgeFlowDatabase,
   type SynchronousOperation,
 } from "../../src/storage/index.js";
+import { RecoveryReviewOperationRepository } from "../../src/storage/recovery-review-operation-repository.js";
 import {
   createStorageWritePermit,
   type StorageWritePermit,
@@ -528,7 +528,9 @@ function createEvidenceFixture(
         operation: "request_readback",
         expectedDecisionVersion: 0,
         resultingDecisionVersion: 1,
-        status: "applied",
+        status: "accepted",
+        actorId: "reviewer-host",
+        operationPayloadDigest: digest("a"),
         evidenceEnvelopeDigest: null,
         resultPlanId: "evidence-plan",
         resultToolRunId: "evidence-run",

@@ -2,6 +2,20 @@ import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
+import {
+  ContextBudgetExceededError,
+  ContextManager,
+  normalizeModelResponseUsage,
+  type ContextManagerOptions,
+} from "../context/index.js";
+import {
+  LoopGuard,
+  computeToolCallSignature,
+  type LoopGuardDecision,
+  type LoopGuardOptions,
+  type LoopGuardRound,
+} from "../loop-guard/index.js";
+import { sha256CanonicalJson } from "../shared/canonical-json.js";
 import { AppError } from "../shared/errors.js";
 import type {
   ScheduledToolResult,
@@ -17,6 +31,7 @@ import {
   ModelResponseSchema,
   type AgentMessage,
   type LLMProvider,
+  type ModelRequest,
   type ModelToolDefinition,
   type ToolCall,
 } from "../provider/types.js";
@@ -46,6 +61,11 @@ export interface AgentRunnerOptions {
   taskIdFactory?: () => string;
   scheduler?: TaskScheduler;
   persistence?: AgentPersistenceAdapter;
+  contextManager?: ContextManager;
+  context?: ContextManagerOptions;
+  loopGuard?: LoopGuard;
+  loopGuardOptions?: LoopGuardOptions;
+  maxTaskTokens?: number;
 }
 
 export interface AgentRunOptions {
@@ -170,6 +190,54 @@ function fromScheduledToolResult(result: ScheduledToolResult): AgentToolResult {
   };
 }
 
+function toLoopGuardRound(
+  calls: readonly ToolCall[],
+  results: readonly AgentToolResult[],
+): LoopGuardRound {
+  const resultById = new Map(results.map((result) => [result.toolCallId, result]));
+  return {
+    entries: calls.flatMap((call) => {
+      const result = resultById.get(call.id);
+      if (result === undefined) return [];
+      const signature = computeToolCallSignature(call);
+      return [{
+        ...signature,
+        ...(result.mode === undefined ? {} : { mode: result.mode }),
+        outcome: result.status,
+        ...(result.status === "succeeded" && result.output !== undefined
+          ? { resultDigest: sha256CanonicalJson(result.output) }
+          : result.error === undefined ? {} : { resultDigest: sha256CanonicalJson(result.error) }),
+      }];
+    }),
+  };
+}
+
+function appendLoopBlockedResults(
+  calls: readonly ToolCall[],
+  toolResults: AgentToolResult[],
+  messages: AgentMessage[],
+): void {
+  for (const [originalIndex, call] of calls.entries()) {
+    const exchange = serializeToolExchange({
+      originalIndex,
+      toolCallId: call.id,
+      toolName: call.name,
+      status: "skipped",
+      error: {
+        code: "LOOP_GUARD_BLOCKED",
+        message: "Tool dispatch was blocked because Loop Guard detected no progress.",
+        details: [],
+      },
+    });
+    toolResults.push(exchange.result);
+    messages.push({
+      role: "tool",
+      toolCallId: call.id,
+      content: exchange.content,
+    });
+  }
+}
+
 export class AgentRunner {
   private readonly provider: LLMProvider;
   private readonly registry: ToolRegistry;
@@ -179,6 +247,9 @@ export class AgentRunner {
   private readonly taskIdFactory: () => string;
   private readonly scheduler: TaskScheduler | undefined;
   private readonly persistence: AgentPersistenceAdapter | undefined;
+  private readonly contextManager: ContextManager;
+  private readonly loopGuard: LoopGuard;
+  private readonly maxTaskTokens: number | null;
 
   constructor(options: AgentRunnerOptions) {
     this.provider = options.provider;
@@ -192,6 +263,28 @@ export class AgentRunner {
     this.taskIdFactory = options.taskIdFactory ?? randomUUID;
     this.scheduler = options.scheduler;
     this.persistence = options.persistence;
+    if (options.contextManager !== undefined && options.context !== undefined) {
+      throw new AppError({
+        code: "CONTEXT_MANAGER_CONFIGURATION_CONFLICT",
+        message: "Provide either a ContextManager or Context Manager options, not both.",
+        statusCode: 500,
+        details: [],
+      });
+    }
+    this.contextManager =
+      options.contextManager ?? new ContextManager(options.context);
+    if (options.loopGuard !== undefined && options.loopGuardOptions !== undefined) {
+      throw new AppError({
+        code: "LOOP_GUARD_CONFIGURATION_CONFLICT",
+        message: "Provide either a LoopGuard or Loop Guard options, not both.",
+        statusCode: 500,
+        details: [],
+      });
+    }
+    this.loopGuard = options.loopGuard ?? new LoopGuard(options.loopGuardOptions);
+    this.maxTaskTokens = options.maxTaskTokens === undefined
+      ? null
+      : z.number().int().positive().parse(options.maxTaskTokens);
 
     if (
       this.scheduler !== undefined &&
@@ -200,6 +293,14 @@ export class AgentRunner {
       throw new AppError({
         code: "AGENT_SCHEDULER_REGISTRY_MISMATCH",
         message: "AgentRunner and TaskScheduler must share the same ToolRegistry.",
+        statusCode: 500,
+        details: [],
+      });
+    }
+    if (this.persistence !== undefined && this.scheduler === undefined) {
+      throw new AppError({
+        code: "SCHEDULER_REQUIRED",
+        message: "Persistent Agent execution requires a scheduler.",
         statusCode: 500,
         details: [],
       });
@@ -249,8 +350,10 @@ export class AgentRunner {
           ]
         : [...this.persistence.initialMessages];
     const toolResults: AgentToolResult[] = [];
+    const loopHistory: LoopGuardRound[] = [];
     let modelRequests = this.persistence?.initialModelRequests ?? 0;
     let toolCalls = this.persistence?.initialToolCalls ?? 0;
+    let localTokenUsage = 0;
 
     if (isAborted(options.signal)) {
       return this.createResult({
@@ -262,6 +365,70 @@ export class AgentRunner {
         modelRequests,
         toolCalls,
       });
+    }
+
+    // A process can stop after persisting an assistant tool-call message but
+    // before all matching tool results are committed. Resume only the missing
+    // calls; completed results already present in the checkpoint are reused.
+    if (this.persistence !== undefined && this.scheduler !== undefined) {
+      const lastAssistant = [...messages].reverse().find(
+        (message) => message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0,
+      );
+      const answered = new Set(messages.flatMap((message) =>
+        message.role === "tool" && message.toolCallId !== undefined
+          ? [message.toolCallId]
+          : [],
+      ));
+      const pendingCalls = (lastAssistant?.role === "assistant" ? lastAssistant.toolCalls ?? [] : []).filter(
+        (call) => !answered.has(call.id),
+      );
+      if (pendingCalls.length > 0) {
+        const decision = this.evaluateLoopGuard(loopHistory, pendingCalls);
+        if (decision !== undefined) {
+          this.persistence.pauseForLoopGuard(pendingCalls, decision);
+          appendLoopBlockedResults(pendingCalls, toolResults, messages);
+          return this.createResult({
+            taskId,
+            status: "paused",
+            stopReason: "loop_detected",
+            messages,
+            toolResults,
+            modelRequests,
+            toolCalls,
+          });
+        }
+        const context = this.persistence.createSchedulerContext(executionSignal);
+        const scheduled = await this.scheduler.execute(pendingCalls, {
+          ...context,
+          taskId,
+          signal: executionSignal,
+        });
+        for (const scheduledResult of scheduled.results) {
+          const exchange = serializeToolExchange(fromScheduledToolResult(scheduledResult));
+          toolResults.push(exchange.result);
+          messages.push({
+            role: "tool",
+            toolCallId: exchange.result.toolCallId,
+            content: exchange.content,
+          });
+        }
+        loopHistory.push(toLoopGuardRound(pendingCalls, scheduled.results.map(fromScheduledToolResult)));
+        if (scheduled.termination !== "completed") {
+          return this.createResult({
+            taskId,
+            status: scheduled.termination === "write_outcome_unknown"
+              ? "write_outcome_unknown"
+              : scheduled.termination === "cancelled" ? "cancelled" : "failed",
+            stopReason: scheduled.termination === "persistence_failed"
+              ? "persistence_failed"
+              : scheduled.termination,
+            messages,
+            toolResults,
+            modelRequests,
+            toolCalls,
+          });
+        }
+      }
     }
 
     while (true) {
@@ -291,11 +458,68 @@ export class AgentRunner {
 
       let response;
       let modelCallId: string | undefined;
-      const request = {
-        model: this.model,
-        messages,
-        tools: this.getModelTools(),
+      let request: ModelRequest;
+      let estimatedNextPromptTokens: number;
+      try {
+        const context = this.contextManager.build({
+          model: this.model,
+          messages,
+          tools: this.getModelTools(),
+        });
+        request = context.request;
+        estimatedNextPromptTokens = context.estimatedPromptTokens;
+      } catch (error) {
+        if (error instanceof ContextBudgetExceededError) {
+          return this.createResult({
+            taskId,
+            status: "limit_reached",
+            stopReason: "context_budget_exceeded",
+            messages,
+            toolResults,
+            modelRequests,
+            toolCalls,
+          });
+        }
+        throw error;
+      }
+      const tokenBudget = this.persistence?.getTokenBudgetState() ?? {
+        maxTokens: this.maxTaskTokens,
+        usage: { source: "estimated" as const, totalTokens: localTokenUsage },
       };
+      const unknownUsageCalls = tokenBudget.usage.unknownCalls ?? 0;
+      const accountedUsageCalls = (tokenBudget.usage.providerCalls ?? 0) +
+        (tokenBudget.usage.estimatedCalls ?? 0) + unknownUsageCalls;
+      const unaccountedModelCalls = Math.max(0, modelRequests - accountedUsageCalls);
+      const uncertainUsageCalls = unknownUsageCalls + unaccountedModelCalls;
+      const usageUncertain = uncertainUsageCalls > 0;
+      const conservativeUnknownTokens =
+        uncertainUsageCalls * this.contextManager.options.maxContextTokens;
+      const persistedUsage = (tokenBudget.usage.totalTokens ?? 0) +
+        conservativeUnknownTokens;
+      const reservedCompletionTokens =
+        this.contextManager.options.reservedCompletionTokens;
+      const projectedUsage =
+        persistedUsage + estimatedNextPromptTokens + reservedCompletionTokens;
+      if (
+        tokenBudget.maxTokens !== null &&
+        projectedUsage > tokenBudget.maxTokens
+      ) {
+        this.persistence?.pauseForTokenBudget({
+          estimatedNextPromptTokens,
+          reservedCompletionTokens,
+          conservativeUnknownTokens,
+          usageUncertain,
+        });
+        return this.createResult({
+          taskId,
+          status: this.persistence === undefined ? "limit_reached" : "paused",
+          stopReason: "task_token_budget_exhausted",
+          messages,
+          toolResults,
+          modelRequests,
+          toolCalls,
+        });
+      }
       const requestStartedAt = Date.now();
       modelRequests += 1;
       try {
@@ -332,24 +556,47 @@ export class AgentRunner {
           });
         }
 
-        response = ModelResponseSchema.parse(rawResponse);
-      } catch {
+        response = normalizeModelResponseUsage(
+          request,
+          ModelResponseSchema.parse(rawResponse),
+        );
+        localTokenUsage += response.usage.totalTokens ?? 0;
+      } catch (error) {
         const cancelled = isAborted(options.signal);
+        const globalBudgetReason = resolveGlobalBudgetReason(error);
         if (this.persistence !== undefined && modelCallId !== undefined) {
           this.persistence.failModelCall(
             modelCallId,
             cancelled ? "cancelled" : "failed",
             Date.now() - requestStartedAt,
             {
-              code: cancelled
-                ? "MODEL_CALL_CANCELLED"
-                : "MODEL_CALL_FAILED",
+              code: cancelled ? "MODEL_CALL_CANCELLED"
+                : globalBudgetReason === undefined ? "MODEL_CALL_FAILED"
+                  : "GLOBAL_MODEL_BUDGET_EXHAUSTED",
               message: cancelled
                 ? "The model call was cancelled."
-                : "The model call failed.",
+                : globalBudgetReason === undefined
+                  ? "The model call failed."
+                  : "The model call was blocked by a global cost safeguard.",
               details: [],
             },
           );
+        }
+        if (!cancelled && globalBudgetReason !== undefined && this.persistence !== undefined) {
+          this.persistence.pauseForGlobalModelBudget({
+            estimatedNextPromptTokens,
+            reservedCompletionTokens,
+            reason: globalBudgetReason,
+          });
+          return this.createResult({
+            taskId,
+            status: "paused",
+            stopReason: "global_model_budget_exhausted",
+            messages,
+            toolResults,
+            modelRequests,
+            toolCalls,
+          });
         }
         return this.createResult({
           taskId,
@@ -423,6 +670,21 @@ export class AgentRunner {
         });
       }
 
+      const loopDecision = this.evaluateLoopGuard(loopHistory, responseToolCalls);
+      if (loopDecision !== undefined) {
+        this.persistence?.pauseForLoopGuard(responseToolCalls, loopDecision);
+        appendLoopBlockedResults(responseToolCalls, toolResults, messages);
+        return this.createResult({
+          taskId,
+          status: "paused",
+          stopReason: "loop_detected",
+          messages,
+          toolResults,
+          modelRequests,
+          toolCalls,
+        });
+      }
+
       if (this.scheduler !== undefined) {
         const schedulerContext =
           this.persistence?.createSchedulerContext(executionSignal) ?? {
@@ -446,6 +708,10 @@ export class AgentRunner {
             content: exchange.content,
           });
         }
+        loopHistory.push(toLoopGuardRound(
+          responseToolCalls,
+          scheduled.results.map(fromScheduledToolResult),
+        ));
 
         if (scheduled.termination === "cancelled") {
           return this.createResult({
@@ -486,6 +752,7 @@ export class AgentRunner {
         continue;
       }
 
+      const currentRoundResults: AgentToolResult[] = [];
       for (const toolCall of responseToolCalls) {
         if (isAborted(options.signal)) {
           return this.createResult({
@@ -503,13 +770,27 @@ export class AgentRunner {
           await this.executeToolCall(toolCall, taskId, executionSignal),
         );
         toolResults.push(exchange.result);
+        currentRoundResults.push(exchange.result);
         messages.push({
           role: "tool",
           toolCallId: toolCall.id,
           content: exchange.content,
         });
       }
+      loopHistory.push(toLoopGuardRound(responseToolCalls, currentRoundResults));
     }
+  }
+
+  private evaluateLoopGuard(
+    localHistory: readonly LoopGuardRound[],
+    toolCalls: readonly ToolCall[],
+  ): LoopGuardDecision | undefined {
+    if (this.persistence !== undefined) {
+      const persisted = this.persistence.getLoopGuardHistory(toolCalls);
+      if (!persisted.eligible) return undefined;
+      return this.loopGuard.evaluate(persisted.rounds, toolCalls);
+    }
+    return this.loopGuard.evaluate(localHistory, toolCalls);
   }
 
   private async executeToolCall(
@@ -542,6 +823,14 @@ export class AgentRunner {
     }
 
     try {
+      if (this.registry.get(toolCall.name).mode === "write") {
+        throw new AppError({
+          code: "WRITE_SCHEDULER_REQUIRED",
+          message: "Write tools require the scheduler and its approval path.",
+          statusCode: 409,
+          details: [],
+        });
+      }
       const output = await this.registry.execute(toolCall.name, input, {
         taskId,
         toolCallId: toolCall.id,
@@ -589,4 +878,13 @@ export class AgentRunner {
       ...(result.finalAnswer === undefined ? {} : { finalAnswer: result.finalAnswer }),
     };
   }
+}
+
+function resolveGlobalBudgetReason(
+  error: unknown,
+): "daily_budget_exhausted" | "provider_concurrency_exhausted" | undefined {
+  if (!(error instanceof AppError)) return undefined;
+  if (error.code === "GLOBAL_MODEL_BUDGET_EXHAUSTED") return "daily_budget_exhausted";
+  if (error.code === "GLOBAL_PROVIDER_CONCURRENCY_EXHAUSTED") return "provider_concurrency_exhausted";
+  return undefined;
 }

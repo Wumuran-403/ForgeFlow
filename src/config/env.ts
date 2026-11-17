@@ -27,8 +27,34 @@ const envSchema = z
     LLM_API_KEY: optionalNonEmptyString,
     LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
     LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(2),
+    LLM_CONTEXT_MAX_TOKENS: z.coerce.number().int().positive().default(16_384),
+    LLM_CONTEXT_RESERVED_COMPLETION_TOKENS: z.coerce.number().int().nonnegative().default(2_048),
+    LLM_TOOL_RESULT_MAX_TOKENS: z.coerce.number().int().min(64).default(1_024),
+    LOOP_GUARD_REPEAT_THRESHOLD: z.coerce.number().int().min(2).default(3),
+    LOOP_GUARD_CYCLE_REPETITIONS: z.coerce.number().int().min(2).default(3),
+    LOOP_GUARD_FAILURE_THRESHOLD: z.coerce.number().int().min(2).default(3),
+    LOOP_GUARD_MAX_HISTORY_ROUNDS: z.coerce.number().int().min(6).default(12),
   })
   .superRefine((value, context) => {
+    if (value.LLM_CONTEXT_RESERVED_COMPLETION_TOKENS >= value.LLM_CONTEXT_MAX_TOKENS) {
+      context.addIssue({
+        code: "custom",
+        path: ["LLM_CONTEXT_RESERVED_COMPLETION_TOKENS"],
+        message: "Reserved completion tokens must be below the context limit.",
+      });
+    }
+    const loopHistoryRequired = Math.max(
+      value.LOOP_GUARD_REPEAT_THRESHOLD,
+      value.LOOP_GUARD_CYCLE_REPETITIONS * 2,
+      value.LOOP_GUARD_FAILURE_THRESHOLD,
+    );
+    if (value.LOOP_GUARD_MAX_HISTORY_ROUNDS < loopHistoryRequired) {
+      context.addIssue({
+        code: "custom",
+        path: ["LOOP_GUARD_MAX_HISTORY_ROUNDS"],
+        message: `Loop Guard history must retain at least ${loopHistoryRequired} rounds.`,
+      });
+    }
     if (value.LLM_PROVIDER !== "deepseek") {
       return;
     }
@@ -58,6 +84,17 @@ export interface AppConfig {
     apiKey: string | undefined;
     timeoutMs: number;
     maxRetries: number;
+  };
+  context: {
+    maxContextTokens: number;
+    reservedCompletionTokens: number;
+    maxToolResultTokens: number;
+  };
+  loopGuard: {
+    consecutiveRepeatThreshold: number;
+    cycleRepetitions: number;
+    failureThreshold: number;
+    maxHistoryRounds: number;
   };
 }
 
@@ -97,6 +134,17 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
       apiKey: values.LLM_API_KEY,
       timeoutMs: values.LLM_TIMEOUT_MS,
       maxRetries: values.LLM_MAX_RETRIES,
+    },
+    context: {
+      maxContextTokens: values.LLM_CONTEXT_MAX_TOKENS,
+      reservedCompletionTokens: values.LLM_CONTEXT_RESERVED_COMPLETION_TOKENS,
+      maxToolResultTokens: values.LLM_TOOL_RESULT_MAX_TOKENS,
+    },
+    loopGuard: {
+      consecutiveRepeatThreshold: values.LOOP_GUARD_REPEAT_THRESHOLD,
+      cycleRepetitions: values.LOOP_GUARD_CYCLE_REPETITIONS,
+      failureThreshold: values.LOOP_GUARD_FAILURE_THRESHOLD,
+      maxHistoryRounds: values.LOOP_GUARD_MAX_HISTORY_ROUNDS,
     },
   };
 }

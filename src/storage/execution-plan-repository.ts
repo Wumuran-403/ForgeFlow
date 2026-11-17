@@ -77,6 +77,52 @@ export class ExecutionPlanRepository {
     return this.get(input.id);
   }
 
+  updateStatusCas(
+    id: string,
+    expectedStatus: ExecutionPlanStatus,
+    expectedVersion: number,
+    status: ExecutionPlanStatus,
+    updatedAt: string,
+    permit: StorageWritePermit,
+  ): ExecutionPlanRecord {
+    assertStorageWritePermit(this.database, permit);
+    if (
+      expectedStatus !== "active" ||
+      !["completed", "failed", "cancelled"].includes(status)
+    ) {
+      throw new AppError({
+        code: "EXECUTION_PLAN_STATE_CONFLICT",
+        message: "Execution plan transition is invalid.",
+        statusCode: 409,
+        details: [],
+      });
+    }
+    const result = this.database
+      .prepare(
+        `
+          UPDATE execution_plans
+          SET status = ?, updated_at = ?
+          WHERE id = ? AND status = ? AND version = ?
+        `,
+      )
+      .run(
+        ExecutionPlanStatusSchema.parse(status),
+        updatedAt,
+        id,
+        ExecutionPlanStatusSchema.parse(expectedStatus),
+        expectedVersion,
+      );
+    if (result.changes !== 1) {
+      throw new AppError({
+        code: "EXECUTION_PLAN_STATE_CONFLICT",
+        message: "Execution plan changed while applying a transition.",
+        statusCode: 409,
+        details: [],
+      });
+    }
+    return this.get(id);
+  }
+
   get(id: string): ExecutionPlanRecord {
     const row = this.database
       .prepare("SELECT * FROM execution_plans WHERE id = ?")
@@ -143,5 +189,18 @@ export class ExecutionPlanRepository {
       )
       .get(taskId, purpose) as ExecutionPlanRow | undefined;
     return row === undefined ? undefined : mapExecutionPlanRow(row);
+  }
+
+  nextVersion(taskId: string): number {
+    const row = this.database
+      .prepare(
+        `
+          SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+          FROM execution_plans
+          WHERE task_id = ?
+        `,
+      )
+      .get(taskId) as { next_version: number };
+    return row.next_version;
   }
 }

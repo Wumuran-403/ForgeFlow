@@ -3,6 +3,8 @@ import {
   type AgentRunOptions,
 } from "../agent/agent-runner.js";
 import type { AgentRunInput, AgentRunResult } from "../agent/types.js";
+import type { ContextManager } from "../context/index.js";
+import type { LoopGuard } from "../loop-guard/index.js";
 import type { LLMProvider } from "../provider/types.js";
 import { AppError } from "../shared/errors.js";
 import type { TaskScheduler } from "../scheduler/index.js";
@@ -13,6 +15,8 @@ import {
   type ForgeFlowDatabase,
 } from "../storage/index.js";
 import type { ToolRegistry } from "../tools/registry.js";
+import type { EvidencePayloadStore } from "../recovery/evidence-payload-store.js";
+import { resolveUnknownWriteSettlement } from "../recovery/recovery-unknown-write-settlement.js";
 import { PersistentExecutionBridge } from "./execution-bridge.js";
 import {
   ExecutionAuthority,
@@ -26,9 +30,12 @@ export interface PersistenceCoordinatorOptions {
   readonly provider: LLMProvider;
   readonly registry: ToolRegistry;
   readonly scheduler: TaskScheduler;
+  readonly finalReviewPayloadStore?: EvidencePayloadStore;
   readonly model: string;
   readonly systemPrompt?: string;
   readonly heartbeatIntervalMs?: number;
+  readonly contextManager?: ContextManager;
+  readonly loopGuard?: LoopGuard;
 }
 
 export class PersistenceCoordinator {
@@ -63,6 +70,23 @@ export class PersistenceCoordinator {
     ownerId: string,
     runOptions: AgentRunOptions = {},
   ): Promise<AgentRunResult> {
+    return this.runInternal(taskId, ownerId, runOptions, false);
+  }
+
+  async resume(
+    taskId: string,
+    ownerId: string,
+    runOptions: AgentRunOptions = {},
+  ): Promise<AgentRunResult> {
+    return this.runInternal(taskId, ownerId, runOptions, true);
+  }
+
+  private async runInternal(
+    taskId: string,
+    ownerId: string,
+    runOptions: AgentRunOptions,
+    resume: boolean,
+  ): Promise<AgentRunResult> {
     const lease = this.options.leaseManager.claim(taskId, ownerId);
     const ownership = {
       taskId,
@@ -90,6 +114,7 @@ export class PersistenceCoordinator {
         ownership,
         authority,
         { signal: executionSignal },
+        resume,
       );
       if (heartbeat.failure !== undefined) {
         throw new AppError({
@@ -185,10 +210,40 @@ export class PersistenceCoordinator {
     },
     authority: ExecutionAuthority,
     runOptions: AgentRunOptions,
+    resume = false,
   ): Promise<AgentRunResult> {
     let snapshot = this.snapshotReader.load(taskId);
-    assertSafeToStartPersistentRun(snapshot);
-    if (snapshot.task.status !== "queued" && snapshot.task.status !== "running") {
+    if (!resume) assertSafeToStartPersistentRun(snapshot);
+    else {
+      if (snapshot.task.status === "paused" &&
+          snapshot.events.some((event) => event.type === "loop_detected")) {
+        throw new AppError({
+          code: "TASK_LOOP_GUARD_BLOCKED",
+          message: "Task remains paused because the detected loop has not been resolved.",
+          statusCode: 409,
+          details: [],
+        });
+      }
+      if (snapshot.task.status === "paused" &&
+          snapshot.events.some((event) => event.type === "token_budget_exhausted")) {
+        throw new AppError({
+          code: "TASK_TOKEN_BUDGET_EXHAUSTED",
+          message: "Task remains paused because its cumulative token budget is exhausted.",
+          statusCode: 409,
+          details: [],
+        });
+      }
+      if (snapshot.task.cancelRequestedAt !== null ||
+          snapshot.recoveryReviews.some((review) => ["pending", "unresolved"].includes(review.status)) ||
+          snapshot.toolRuns.some((run) => (run.status === "unknown" &&
+            (this.options.finalReviewPayloadStore === undefined ||
+              resolveUnknownWriteSettlement(snapshot, run.id, this.options.finalReviewPayloadStore) !== "resolved_success")) ||
+            (run.mode === "write" && run.status === "running")) ||
+          snapshot.approvals.some((approval) => approval.status === "pending")) {
+        throw new AppError({ code: "TASK_RECOVERY_BLOCKED", message: "Task has an unresolved recovery boundary.", statusCode: 409 });
+      }
+    }
+    if (!["queued", "running", ...(resume ? ["paused", "waiting_approval"] : [])].includes(snapshot.task.status)) {
       throw new AppError({
         code: "TASK_NOT_EXECUTABLE",
         message: "Task is not in an executable state.",
@@ -204,6 +259,14 @@ export class PersistenceCoordinator {
         status: "running",
       });
       snapshot = this.snapshotReader.load(taskId);
+    } else if (resume && (snapshot.task.status === "paused" || snapshot.task.status === "waiting_approval")) {
+      this.stateMachine.transitionTask({
+        ...ownership,
+        expectedTaskVersion: snapshot.task.version,
+        expectedStatus: snapshot.task.status,
+        status: "running",
+      });
+      snapshot = this.snapshotReader.load(taskId);
     }
 
     const bridge = new PersistentExecutionBridge({
@@ -212,6 +275,8 @@ export class PersistenceCoordinator {
       stateMachine: this.stateMachine,
       scheduler: this.options.scheduler,
       registry: this.options.registry,
+      ...(this.options.finalReviewPayloadStore === undefined ? {} :
+        { finalReviewPayloadStore: this.options.finalReviewPayloadStore }),
       snapshot,
       ownership,
       authority,
@@ -222,6 +287,12 @@ export class PersistenceCoordinator {
       model: this.options.model,
       scheduler: this.options.scheduler,
       persistence: bridge,
+      ...(this.options.contextManager === undefined
+        ? {}
+        : { contextManager: this.options.contextManager }),
+      ...(this.options.loopGuard === undefined
+        ? {}
+        : { loopGuard: this.options.loopGuard }),
       maxModelTurns: snapshot.task.maxModelTurns,
       maxToolCalls: snapshot.task.maxToolCalls,
       ...(this.options.systemPrompt === undefined
